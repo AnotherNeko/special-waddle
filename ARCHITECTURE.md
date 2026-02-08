@@ -25,6 +25,14 @@ Luanti mod uses `minetest.request_insecure_environment()` to access `require("ff
 
 Each phase has a passing test before moving to the next.
 
+### Testing Methodology
+
+- **Rust tests**: Use `cargo test` for unit testing Rust functions in isolation
+- **Lua/integration tests**: Launch Luanti, join a world with the mod enabled, and manually verify behavior
+  - Early phases (1-3): Check chat window for test output messages
+  - Later phases (4+): Visually inspect the rendered world
+  - Rationale: At current time-costs, manual testing in Luanti is the most practical approach for validating Lua code and FFI integration
+
 ### Phase 1: FFI Bridge Proof
 - **Rust**: `extern "C" fn va_add(a: i32, b: i32) -> i32`
 - **Lua**: Load library, call `va_add(2, 3)`, print result
