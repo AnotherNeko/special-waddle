@@ -130,18 +130,19 @@ local function render_region_at_world(min_x, min_y, min_z, max_x, max_y, max_z, 
         return
     end
 
-    -- Place nodes at world coordinates
+    -- Place nodes at world coordinates (always set, either air or cell)
     local offset = 0
     local placed_count = 0
     for z = min_z, max_z - 1 do
         for y = min_y, max_y - 1 do
             for x = min_x, max_x - 1 do
                 local cell_state = buffer[offset]
+                local node_name = cell_state == 1 and "voxel_automata:cell" or "air"
+                minetest.set_node(
+                    {x = world_x + (x - min_x), y = world_y + (y - min_y), z = world_z + (z - min_z)},
+                    {name = node_name}
+                )
                 if cell_state == 1 then
-                    minetest.set_node(
-                        {x = world_x + (x - min_x), y = world_y + (y - min_y), z = world_z + (z - min_z)},
-                        {name = "voxel_automata:cell"}
-                    )
                     placed_count = placed_count + 1
                 end
                 offset = offset + 1
@@ -269,27 +270,33 @@ for z = 0, 15 do
 end
 minetest.log("action", "[voxel_automata] Phase 3: Initial alive count = " .. alive_count)
 
--- Step the automaton once
-va.va_step(state)
-local generation_after_step = va.va_get_generation(state)
-minetest.log("action", "[voxel_automata] Phase 3: After step, generation = " .. tonumber(generation_after_step))
-
--- Count alive cells after step
-local alive_count_after = 0
-for z = 0, 15 do
-    for y = 0, 15 do
-        for x = 0, 15 do
-            if va.va_get_cell(state, x, y, z) == 1 then
-                alive_count_after = alive_count_after + 1
-            end
-        end
-    end
-end
-minetest.log("action", "[voxel_automata] Phase 3: Alive count after step = " .. alive_count_after)
+-- Store for /ca_test command
+local alive_count_after = alive_count
 
 minetest.log("action", "[voxel_automata] Loaded successfully!")
 
 -- Register chat commands for interaction
+minetest.register_chatcommand("ca_step", {
+    description = "Step the automaton forward by N generations. Usage: /ca_step [count]",
+    func = function(name, param)
+        if not global_state then
+            return false, "No automaton state available"
+        end
+
+        local count = tonumber(param) or 1
+        if count < 1 or count > 100 then
+            return false, "Count must be between 1 and 100"
+        end
+
+        for i = 1, count do
+            va.va_step(global_state)
+        end
+
+        local generation = va.va_get_generation(global_state)
+        return true, "Stepped " .. count .. " generation(s). Now at generation " .. tonumber(generation)
+    end
+})
+
 minetest.register_chatcommand("ca_test", {
     description = "Test voxel automata: print phase results",
     func = function(name, param)
