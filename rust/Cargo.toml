@@ -1,0 +1,8 @@
+[package]
+name = "voxel-automata"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "voxel_automata"
+crate-type = ["cdylib"]
