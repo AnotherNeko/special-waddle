@@ -21,6 +21,18 @@ Luanti mod uses `minetest.request_insecure_environment()` to access `require("ff
 2. Grant filesystem access: `flatpak override --user --filesystem=/home/kirrim/git/voxel-automata:ro org.luanti.luanti`
 3. Add to trusted mods in `minetest.conf`: `secure.trusted_mods = voxel_automata`
 
+## Development Workflow
+
+### Commit Policy
+
+**Do NOT commit code that hasn't been tested.** This is a test-driven project. Before committing:
+
+1. **Rust changes**: Run `cargo test --release` and verify all tests pass
+2. **Lua changes**: Test in Luanti using the provided chat commands or interactive features
+3. **Integration changes**: Verify both Rust tests and Lua behavior work together
+
+Attempting to commit untested code wastes time and breaks the development flow. Test first, then commit.
+
 ## Development Phases (Test-Driven)
 
 Each phase has a passing test before moving to the next.
@@ -29,9 +41,11 @@ Each phase has a passing test before moving to the next.
 
 - **Rust tests**: Use `cargo test` for unit testing Rust functions in isolation
 - **Lua/integration tests**: Launch Luanti, join a world with the mod enabled, and manually verify behavior
-  - Early phases (1-3): Check chat window for test output messages
-  - Later phases (4+): Visually inspect the rendered world
-  - Rationale: At current time-costs, manual testing in Luanti is the most practical approach for validating Lua code and FFI integration
+  - Early phases (1-3): Check chat window using `/ca_test` command for test output
+  - Later phases (4+): Use `/ca_render` or similar commands to visually inspect the rendered world
+  - Rationale: Manual testing in Luanti is the most practical approach for validating Lua code and FFI integration
+
+**Important**: Never commit a phase until you can manually verify the feature works in Luanti.
 
 ### Phase 1: FFI Bridge Proof
 - **Rust**: `extern "C" fn va_add(a: i32, b: i32) -> i32`
@@ -51,9 +65,11 @@ Each phase has a passing test before moving to the next.
 - **Test (Lua)**: Create 16³ grid, set cross pattern (5 cells), step, count alive cells (all passing)
 
 ### Phase 4: Visualize
-- **Rust**: `va_extract_region(s, out_buf, min_xyz, max_xyz) -> u64`
-- **Lua**: Register node type, VoxelManip to place alive cells
-- **Test**: Create 16³ pattern, render, visually confirm nodes appear
+- **Rust**: `va_extract_region(s, out_buf, min_xyz, max_xyz) -> u64` — extracts rectangular region into flat buffer
+- **Lua**: Register node type, render regions with direct node placement (VoxelManip for Phase 6+ optimization)
+- **Test**: 
+  - Rust: Unit tests for region extraction (basic, full grid, empty, out-of-bounds, null checks)
+  - Lua: Run `/ca_test` in Luanti to verify FFI and automation logic; run `/ca_render` to visually inspect 16³ cross pattern at player location
 
 ### Phase 5: Interactive Stepping
 - **Lua**: `/ca_step`, `/ca_start`, `/ca_stop` commands, globalstep with timer
