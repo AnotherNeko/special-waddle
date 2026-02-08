@@ -46,8 +46,9 @@ Each phase has a passing test before moving to the next.
 ### Phase 3: Small Grid + Step
 - **Rust**: `va_create_grid(w,h,d)`, `va_set_cell(s,x,y,z,alive)`, `va_get_cell(s,x,y,z)`, `va_step(s)`
 - Grid: `Vec<u8>` (one byte per cell), naive Moore (26-neighbor) counting
-- **Test (Rust)**: Unit test — set known pattern in 8³, step, verify outcome
-- **Test (Lua)**: Create 16³, set cells, step, read back, print results
+- Coordinates: `i16` (saves memory for Luanti compatibility)
+- **Test (Rust)**: Unit tests — 8³ grid patterns, boundary conditions, B4/S4 rule verification (all passing)
+- **Test (Lua)**: Create 16³ grid, set cross pattern (5 cells), step, count alive cells (all passing)
 
 ### Phase 4: Visualize
 - **Rust**: `va_extract_region(s, out_buf, min_xyz, max_xyz) -> u64`
@@ -67,12 +68,12 @@ Each phase has a passing test before moving to the next.
 - **Rust**: XOR grid for change detection, `va_get_changes_in_region()`
 - **Test**: Walk around, viewport follows, incremental rendering works
 
-## Data Structures (Planned)
+## Data Structures
 
 ### Phase 3-5: Naive Grid
 ```rust
 struct State {
-    width: u32, height: u32, depth: u32,
+    width: i16, height: i16, depth: i16,  // i16 matches Luanti's 2^16 world limit
     cells: Vec<u8>,  // 1 byte per cell: 0=dead, 1=alive
     generation: u64,
 }
@@ -81,7 +82,7 @@ struct State {
 ### Phase 6+: Bitpacked Grid
 ```rust
 struct State {
-    width: u32, height: u32, depth: u32,
+    width: i16, height: i16, depth: i16,  // i16 matches Luanti's 2^16 world limit
     current: Vec<u64>,  // X-axis packed into u64 words
     next: Vec<u64>,     // double-buffered for stepping
     generation: u64,
