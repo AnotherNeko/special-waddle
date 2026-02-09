@@ -4,6 +4,7 @@ mod tests {
     use crate::phase2::{va_create, va_destroy, va_get_generation};
     use crate::phase3::{va_create_grid, va_get_cell, va_set_cell, va_step};
     use crate::phase4::va_extract_region;
+    use crate::phase5::va_import_region;
     use std::ptr;
 
     #[test]
@@ -293,6 +294,137 @@ mod tests {
             // Null buffer pointer
             assert_eq!(
                 va_extract_region(state, ptr::null_mut(), 0, 0, 0, 4, 4, 4),
+                0
+            );
+
+            va_destroy(state);
+        }
+    }
+
+    // ========================================================================
+    // Phase 5: Import Region Tests
+    // ========================================================================
+
+    #[test]
+    fn test_phase5_import_region_basic() {
+        unsafe {
+            let state = va_create();
+            va_create_grid(state, 8, 8, 8);
+
+            // Create buffer with some alive cells
+            let mut buffer = vec![0u8; 4 * 4 * 4];
+            buffer[0] = 1; // (2,2,2) - first in z,y,x iteration
+            buffer[1] = 1; // (3,2,2)
+            buffer[4] = 1; // (2,3,2) - next y
+
+            // Import region from (2,2,2) to (6,6,6)
+            let bytes_read = va_import_region(state, buffer.as_ptr(), 2, 2, 2, 6, 6, 6);
+
+            assert_eq!(bytes_read, 64);
+
+            // Verify cells were imported correctly
+            assert_eq!(va_get_cell(state, 2, 2, 2), 1);
+            assert_eq!(va_get_cell(state, 3, 2, 2), 1);
+            assert_eq!(va_get_cell(state, 2, 3, 2), 1);
+            assert_eq!(va_get_cell(state, 4, 4, 4), 0); // Should be dead
+
+            // Cells outside the imported region should still be dead
+            assert_eq!(va_get_cell(state, 0, 0, 0), 0);
+            assert_eq!(va_get_cell(state, 7, 7, 7), 0);
+
+            va_destroy(state);
+        }
+    }
+
+    #[test]
+    fn test_phase5_import_region_normalization() {
+        unsafe {
+            let state = va_create();
+            va_create_grid(state, 4, 4, 4);
+
+            // Buffer with various non-zero values (should all normalize to 1)
+            let buffer = vec![
+                0, 1, 5, 255, // z=0,y=0,x=0..3
+                128, 2, 0, 1, // z=0,y=1,x=0..3
+                42, 17, 99, 0, // z=0,y=2,x=0..3
+                1, 0, 3, 200, // z=0,y=3,x=0..3
+                0, 0, 0, 0, // z=1,y=0,x=0..3
+                1, 1, 1, 1, // z=1,y=1,x=0..3
+                0, 0, 0, 0, // z=1,y=2,x=0..3
+                0, 0, 0, 0, // z=1,y=3,x=0..3
+                0, 0, 0, 0, // z=2,y=0,x=0..3
+                0, 0, 0, 0, // z=2,y=1,x=0..3
+                0, 0, 0, 0, // z=2,y=2,x=0..3
+                0, 0, 0, 0, // z=2,y=3,x=0..3
+                0, 0, 0, 0, // z=3,y=0,x=0..3
+                0, 0, 0, 0, // z=3,y=1,x=0..3
+                0, 0, 0, 0, // z=3,y=2,x=0..3
+                0, 0, 0, 0, // z=3,y=3,x=0..3
+            ];
+
+            va_import_region(state, buffer.as_ptr(), 0, 0, 0, 4, 4, 4);
+
+            // All non-zero should become 1, zeros stay 0
+            assert_eq!(va_get_cell(state, 0, 0, 0), 0);
+            assert_eq!(va_get_cell(state, 1, 0, 0), 1); // 1 -> 1
+            assert_eq!(va_get_cell(state, 2, 0, 0), 1); // 5 -> 1
+            assert_eq!(va_get_cell(state, 3, 0, 0), 1); // 255 -> 1
+            assert_eq!(va_get_cell(state, 0, 1, 0), 1); // 128 -> 1
+            assert_eq!(va_get_cell(state, 1, 1, 0), 1); // 2 -> 1
+            assert_eq!(va_get_cell(state, 2, 1, 0), 0); // 0 -> 0
+            assert_eq!(va_get_cell(state, 3, 1, 0), 1); // 1 -> 1
+
+            va_destroy(state);
+        }
+    }
+
+    #[test]
+    fn test_phase5_import_region_symmetry() {
+        unsafe {
+            let state = va_create();
+            va_create_grid(state, 8, 8, 8);
+
+            // Set some cells
+            va_set_cell(state, 2, 2, 2, 1);
+            va_set_cell(state, 3, 3, 3, 1);
+            va_set_cell(state, 1, 5, 2, 1);
+
+            // Extract region
+            let mut extract_buffer = vec![0u8; 4 * 4 * 4];
+            va_extract_region(state, extract_buffer.as_mut_ptr(), 0, 0, 0, 4, 4, 4);
+
+            // Clear grid
+            va_create_grid(state, 8, 8, 8);
+
+            // Import same region back
+            va_import_region(state, extract_buffer.as_ptr(), 0, 0, 0, 4, 4, 4);
+
+            // Should match original (within the 0-4 region)
+            assert_eq!(va_get_cell(state, 2, 2, 2), 1);
+            assert_eq!(va_get_cell(state, 3, 3, 3), 1);
+            assert_eq!(va_get_cell(state, 1, 5, 2), 0); // Outside region, should be dead
+            assert_eq!(va_get_cell(state, 0, 0, 0), 0);
+
+            va_destroy(state);
+        }
+    }
+
+    #[test]
+    fn test_phase5_import_region_null_checks() {
+        unsafe {
+            let state = va_create();
+            va_create_grid(state, 4, 4, 4);
+            let buffer = vec![0u8; 64];
+
+            // Null state pointer
+            assert_eq!(
+                va_import_region(ptr::null_mut(), buffer.as_ptr(), 0, 0, 0, 4, 4, 4),
+                0
+            );
+
+            // Null buffer pointer
+            assert_eq!(
+                va_import_region(state, ptr::null(), 0, 0, 0, 4, 4, 4),
                 0
             );
 

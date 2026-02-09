@@ -34,6 +34,11 @@ ffi.cdef[[
     uint64_t va_extract_region(const State* ptr, uint8_t* out_buf,
                                 int16_t min_x, int16_t min_y, int16_t min_z,
                                 int16_t max_x, int16_t max_y, int16_t max_z);
+
+    // Phase 5: Bidirectional sync
+    uint64_t va_import_region(State* ptr, const uint8_t* in_buf,
+                               int16_t min_x, int16_t min_y, int16_t min_z,
+                               int16_t max_x, int16_t max_y, int16_t max_z);
 ]]
 
 -- Load the Rust library
@@ -43,14 +48,75 @@ local va = ffi.load(lib_path)
 -- Global state holder (initialized later)
 local global_state = nil
 
--- Phase 4: Register node type for visualization
+-- ============================================================================
+-- Phase 5: Coordinate Mapping & Animation State
+-- ============================================================================
+
+-- Viewport anchor: world position corresponding to automaton (0,0,0)
+local viewport_anchor = {x = 0, y = 0, z = 0}
+local grid_size = 16
+
+-- Coordinate conversion helpers
+local function world_to_automaton(world_pos)
+    return {
+        x = world_pos.x - viewport_anchor.x,
+        y = world_pos.y - viewport_anchor.y,
+        z = world_pos.z - viewport_anchor.z
+    }
+end
+
+local function automaton_to_world(auto_pos)
+    return {
+        x = auto_pos.x + viewport_anchor.x,
+        y = auto_pos.y + viewport_anchor.y,
+        z = auto_pos.z + viewport_anchor.z
+    }
+end
+
+local function is_in_automaton_bounds(auto_pos)
+    return auto_pos.x >= 0 and auto_pos.x < grid_size
+       and auto_pos.y >= 0 and auto_pos.y < grid_size
+       and auto_pos.z >= 0 and auto_pos.z < grid_size
+end
+
+-- Animation state
+local animation_state = {
+    running = false,
+    interval = 1.0,  -- seconds between steps
+    timer = 0.0,
+}
+
+-- Phase 4/5: Register node type for visualization with interaction callbacks
 minetest.register_node("voxel_automata:cell", {
     description = "Cellular Automata Cell",
     tiles = {"voxel_automata_cell.png"},
     walkable = false,
     sunlight_propagates = true,
-    groups = {not_in_creative_inventory = 1},
+    groups = {dig_immediate = 3, not_in_creative_inventory = 1},
+
+    -- Phase 5: Sync cell removal back to automaton
+    on_dig = function(pos, node, digger)
+        if global_state then
+            local auto_pos = world_to_automaton(pos)
+            if is_in_automaton_bounds(auto_pos) then
+                va.va_set_cell(global_state, auto_pos.x, auto_pos.y, auto_pos.z, 0)
+                minetest.log("action", "[voxel_automata] Cell dug at automaton " .. minetest.pos_to_string(auto_pos))
+            end
+        end
+        minetest.node_dig(pos, node, digger)
+    end,
 })
+
+-- Phase 5: Sync cell placement back to automaton
+minetest.register_on_placenode(function(pos, newnode, placer, oldnode, itemstack, pointed_thing)
+    if newnode.name == "voxel_automata:cell" and global_state then
+        local auto_pos = world_to_automaton(pos)
+        if is_in_automaton_bounds(auto_pos) then
+            va.va_set_cell(global_state, auto_pos.x, auto_pos.y, auto_pos.z, 1)
+            minetest.log("action", "[voxel_automata] Cell placed at automaton " .. minetest.pos_to_string(auto_pos))
+        end
+    end
+end)
 
 -- Helper function to render a region using individual node placement
 -- TODO: Replace with VoxelManip variant once timing issues are resolved
@@ -282,9 +348,75 @@ local alive_count_after = alive_count
 
 minetest.log("action", "[voxel_automata] Loaded successfully!")
 
--- Register chat commands for interaction
-minetest.register_chatcommand("ca_step", {
-    description = "Step the automaton forward by N generations. Usage: /ca_step [count]",
+-- ============================================================================
+-- Phase 5: Animation System
+-- ============================================================================
+
+-- Globalstep callback for automatic stepping and rendering
+minetest.register_globalstep(function(dtime)
+    if not animation_state.running or not global_state then
+        return
+    end
+
+    animation_state.timer = animation_state.timer + dtime
+
+    if animation_state.timer >= animation_state.interval then
+        animation_state.timer = 0
+
+        -- Step the automaton
+        va.va_step(global_state)
+
+        -- Render using VoxelManip at viewport anchor
+        render_region_at_world_voxelmanip(
+            0, 0, 0,
+            grid_size, grid_size, grid_size,
+            viewport_anchor.x, viewport_anchor.y, viewport_anchor.z
+        )
+
+        local gen = va.va_get_generation(global_state)
+        minetest.log("action", "[voxel_automata] Animation step: generation " .. tonumber(gen))
+    end
+end)
+
+-- ============================================================================
+-- Chat Commands
+-- ============================================================================
+
+-- /va info: Show automaton statistics
+minetest.register_chatcommand("va_info", {
+    description = "Show automaton statistics (generation, alive cells, grid size, viewport anchor)",
+    func = function(name, param)
+        if not global_state then
+            return false, "No automaton state available"
+        end
+
+        local generation = va.va_get_generation(global_state)
+
+        -- Count alive cells
+        local alive_count = 0
+        for z = 0, grid_size - 1 do
+            for y = 0, grid_size - 1 do
+                for x = 0, grid_size - 1 do
+                    if va.va_get_cell(global_state, x, y, z) == 1 then
+                        alive_count = alive_count + 1
+                    end
+                end
+            end
+        end
+
+        minetest.chat_send_player(name, "[voxel_automata] Generation: " .. tonumber(generation))
+        minetest.chat_send_player(name, "[voxel_automata] Alive cells: " .. alive_count .. " / " .. (grid_size * grid_size * grid_size))
+        minetest.chat_send_player(name, "[voxel_automata] Grid size: " .. grid_size .. "x" .. grid_size .. "x" .. grid_size)
+        minetest.chat_send_player(name, "[voxel_automata] Viewport anchor: " .. minetest.pos_to_string(viewport_anchor))
+        minetest.chat_send_player(name, "[voxel_automata] Animation: " .. (animation_state.running and "running" or "stopped"))
+
+        return true, "Info displayed"
+    end
+})
+
+-- /va step: Step the automaton forward by N generations
+minetest.register_chatcommand("va_step", {
+    description = "Step the automaton forward by N generations. Usage: /va_step [count]",
     func = function(name, param)
         if not global_state then
             return false, "No automaton state available"
@@ -304,19 +436,14 @@ minetest.register_chatcommand("ca_step", {
     end
 })
 
-minetest.register_chatcommand("ca_test", {
-    description = "Test voxel automata: print phase results",
+-- /va show: Render automaton at world position (VoxelManip only)
+minetest.register_chatcommand("va_show", {
+    description = "Render automaton grid at world position using VoxelManip. Usage: /va_show [world_x] [world_y] [world_z]",
     func = function(name, param)
-        minetest.chat_send_player(name, "[voxel_automata] Phase 1: " .. a .. " + " .. b .. " = " .. result)
-        minetest.chat_send_player(name, "[voxel_automata] Phase 2: generation = " .. tonumber(generation))
-        minetest.chat_send_player(name, "[voxel_automata] Phase 3: Initial alive = " .. alive_count .. ", After step = " .. alive_count_after)
-        return true, "Test results printed"
-    end
-})
+        if not global_state then
+            return false, "No automaton state available"
+        end
 
-minetest.register_chatcommand("ca_render", {
-    description = "Render automata grid at world position. Usage: /ca_render [world_x] [world_y] [world_z]",
-    func = function(name, param)
         local world_x, world_y, world_z = param:match("([^ ]+) ([^ ]+) ([^ ]+)")
 
         if not world_x or not world_y or not world_z then
@@ -336,87 +463,119 @@ minetest.register_chatcommand("ca_render", {
             world_z = tonumber(world_z)
         end
 
-        -- Extract from automaton grid (0-15) and place at world coordinates
-        minetest.log("action", "[voxel_automata] Extracting from grid (0-15) and placing at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
-        render_region_at_world(0, 0, 0, 16, 16, 16, world_x, world_y, world_z)
+        -- Update viewport anchor
+        viewport_anchor.x = world_x
+        viewport_anchor.y = world_y
+        viewport_anchor.z = world_z
 
-        return true, "Rendered automata grid at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")"
-    end
-})
-
-minetest.register_chatcommand("ca_render_vm", {
-    description = "Render automata grid using VoxelManip (bulk ops). Usage: /ca_render_vm [world_x] [world_y] [world_z]",
-    func = function(name, param)
-        local world_x, world_y, world_z = param:match("([^ ]+) ([^ ]+) ([^ ]+)")
-
-        if not world_x or not world_y or not world_z then
-            -- If no args, use player position rounded to nearest 16-block boundary
-            local player = minetest.get_player_by_name(name)
-            if not player then
-                return false, "Player not found"
-            end
-
-            local pos = player:get_pos()
-            world_x = math.floor(pos.x / 16) * 16
-            world_y = math.floor(pos.y / 16) * 16
-            world_z = math.floor(pos.z / 16) * 16
-        else
-            world_x = tonumber(world_x)
-            world_y = tonumber(world_y)
-            world_z = tonumber(world_z)
-        end
-
-        -- Extract from automaton grid (0-15) and place at world coordinates using VoxelManip
+        -- Render using VoxelManip
         local start_time = minetest.get_us_time()
-        render_region_at_world_voxelmanip(0, 0, 0, 16, 16, 16, world_x, world_y, world_z)
-        local elapsed = (minetest.get_us_time() - start_time) / 1000  -- Convert to milliseconds
+        render_region_at_world_voxelmanip(0, 0, 0, grid_size, grid_size, grid_size, world_x, world_y, world_z)
+        local elapsed = (minetest.get_us_time() - start_time) / 1000
 
-        minetest.chat_send_player(name, string.format("[voxel_automata] VoxelManip render completed in %.2f ms", elapsed))
-        return true, "VoxelManip rendered automata grid at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")"
+        minetest.chat_send_player(name, string.format("[voxel_automata] Rendered in %.2f ms at %s", elapsed, minetest.pos_to_string(viewport_anchor)))
+        return true, "Automaton rendered"
     end
 })
 
-minetest.register_chatcommand("ca_render_bench", {
-    description = "Benchmark both rendering methods. Usage: /ca_render_bench [world_x] [world_y] [world_z]",
+-- /va animate: Start automatic stepping and rendering
+minetest.register_chatcommand("va_animate", {
+    description = "Start automatic stepping and rendering. Usage: /va_animate [interval_ms]",
     func = function(name, param)
-        local world_x, world_y, world_z = param:match("([^ ]+) ([^ ]+) ([^ ]+)")
-
-        if not world_x or not world_y or not world_z then
-            -- If no args, use player position rounded to nearest 16-block boundary
-            local player = minetest.get_player_by_name(name)
-            if not player then
-                return false, "Player not found"
-            end
-
-            local pos = player:get_pos()
-            world_x = math.floor(pos.x / 16) * 16
-            world_y = math.floor(pos.y / 16) * 16
-            world_z = math.floor(pos.z / 16) * 16
-        else
-            world_x = tonumber(world_x)
-            world_y = tonumber(world_y)
-            world_z = tonumber(world_z)
+        if not global_state then
+            return false, "No automaton state available"
         end
 
-        minetest.chat_send_player(name, "[voxel_automata] Benchmarking at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
+        local interval_ms = tonumber(param) or 1000
+        if interval_ms < 100 or interval_ms > 10000 then
+            return false, "Interval must be between 100 and 10000 milliseconds"
+        end
 
-        -- Test direct node placement
-        local start_direct = minetest.get_us_time()
-        render_region_at_world(0, 0, 0, 16, 16, 16, world_x, world_y, world_z)
-        local elapsed_direct = (minetest.get_us_time() - start_direct) / 1000
+        animation_state.running = true
+        animation_state.interval = interval_ms / 1000.0
+        animation_state.timer = 0
 
-        -- Test VoxelManip
-        local start_vm = minetest.get_us_time()
-        render_region_at_world_voxelmanip(0, 0, 0, 16, 16, 16, world_x + 20, world_y, world_z)
-        local elapsed_vm = (minetest.get_us_time() - start_vm) / 1000
+        minetest.chat_send_player(name, string.format("[voxel_automata] Animation started (interval: %d ms)", interval_ms))
+        return true, "Animation started"
+    end
+})
 
-        local speedup = elapsed_direct / elapsed_vm
+-- /va stop: Stop animation
+minetest.register_chatcommand("va_stop", {
+    description = "Stop automatic animation",
+    func = function(name, param)
+        if not animation_state.running then
+            return false, "Animation is not running"
+        end
 
-        minetest.chat_send_player(name, string.format("Direct node placement: %.2f ms", elapsed_direct))
-        minetest.chat_send_player(name, string.format("VoxelManip bulk ops:   %.2f ms", elapsed_vm))
-        minetest.chat_send_player(name, string.format("Speedup: %.2fx", speedup))
+        animation_state.running = false
+        minetest.chat_send_player(name, "[voxel_automata] Animation stopped")
+        return true, "Animation stopped"
+    end
+})
 
-        return true, "Benchmark complete"
+-- /va_pull: Pull world state into automaton (recovery/debug command)
+minetest.register_chatcommand("va_pull", {
+    description = "Pull world nodes into automaton state (world → automaton sync)",
+    func = function(name, param)
+        if not global_state then
+            return false, "No automaton state available"
+        end
+
+        -- Create buffer
+        local buffer_size = grid_size * grid_size * grid_size
+        local buffer = ffi.new("uint8_t[?]", buffer_size)
+
+        -- Scan world region using VoxelManip
+        local vm = VoxelManip()
+        local world_min = viewport_anchor
+        local world_max = {
+            x = viewport_anchor.x + grid_size - 1,
+            y = viewport_anchor.y + grid_size - 1,
+            z = viewport_anchor.z + grid_size - 1
+        }
+
+        local emerged_min, emerged_max = vm:read_from_map(world_min, world_max)
+        local data = vm:get_data()
+        local area = VoxelArea:new({MinEdge = emerged_min, MaxEdge = emerged_max})
+        local cell_id = minetest.get_content_id("voxel_automata:cell")
+
+        -- Fill buffer from world (z,y,x order)
+        local offset = 0
+        local synced_alive = 0
+        for z = 0, grid_size - 1 do
+            for y = 0, grid_size - 1 do
+                for x = 0, grid_size - 1 do
+                    local world_pos = {
+                        x = viewport_anchor.x + x,
+                        y = viewport_anchor.y + y,
+                        z = viewport_anchor.z + z
+                    }
+                    local vi = area:indexp(world_pos)
+                    local is_alive = (data[vi] == cell_id) and 1 or 0
+                    buffer[offset] = is_alive
+                    if is_alive == 1 then
+                        synced_alive = synced_alive + 1
+                    end
+                    offset = offset + 1
+                end
+            end
+        end
+
+        -- Import to automaton
+        local bytes_read = va.va_import_region(
+            global_state,
+            buffer,
+            0, 0, 0,
+            grid_size, grid_size, grid_size
+        )
+
+        if bytes_read == 0 then
+            return false, "Failed to import region"
+        end
+
+        minetest.chat_send_player(name, string.format("[voxel_automata] Pulled %d alive cells from world into automaton", synced_alive))
+        return true, "World → automaton pull complete"
     end
 })
 
