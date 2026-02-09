@@ -153,9 +153,8 @@ local function render_region_at_world(min_x, min_y, min_z, max_x, max_y, max_z, 
     minetest.log("action", "[voxel_automata] Placed " .. placed_count .. " nodes at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
 end
 
--- VoxelManip variant (for Phase 6+ optimization when timing issues are resolved)
---[[
-local function render_region_voxelmanip(min_x, min_y, min_z, max_x, max_y, max_z)
+-- VoxelManip variant for bulk operations (optimized alternative to render_region_at_world)
+local function render_region_at_world_voxelmanip(min_x, min_y, min_z, max_x, max_y, max_z, world_x, world_y, world_z)
     if not global_state then
         minetest.log("warning", "[voxel_automata] Cannot render: global_state is nil")
         return
@@ -183,30 +182,37 @@ local function render_region_voxelmanip(min_x, min_y, min_z, max_x, max_y, max_z
         return
     end
 
+    -- Calculate world coordinates
+    local world_min = {x = world_x, y = world_y, z = world_z}
+    local world_max = {x = world_x + width - 1, y = world_y + height - 1, z = world_z + depth - 1}
+
     -- Create VoxelManip for bulk writing
-    local vm = minetest.get_voxel_manipulator()
-    local emerged_min, emerged_max = vm:read_from_map(
-        {x = min_x, y = min_y, z = min_z},
-        {x = max_x - 1, y = max_y - 1, z = max_z - 1}
-    )
+    local vm = VoxelManip()
+    local emerged_min, emerged_max = vm:read_from_map(world_min, world_max)
 
     local data = vm:get_data()
     local area = VoxelArea:new({MinEdge = emerged_min, MaxEdge = emerged_max})
 
+    -- Get content IDs
     local node_id = minetest.get_content_id("voxel_automata:cell")
     local air_id = minetest.get_content_id("air")
 
     -- Fill data array from buffer
     local offset = 0
+    local placed_count = 0
     for z = min_z, max_z - 1 do
         for y = min_y, max_y - 1 do
             for x = min_x, max_x - 1 do
                 local cell_state = buffer[offset]
-                local vi = area:indexp({x = x, y = y, z = z})
+                local world_pos = {
+                    x = world_x + (x - min_x),
+                    y = world_y + (y - min_y),
+                    z = world_z + (z - min_z)
+                }
+                local vi = area:indexp(world_pos)
+                data[vi] = cell_state == 1 and node_id or air_id
                 if cell_state == 1 then
-                    data[vi] = node_id
-                else
-                    data[vi] = air_id
+                    placed_count = placed_count + 1
                 end
                 offset = offset + 1
             end
@@ -215,10 +221,11 @@ local function render_region_voxelmanip(min_x, min_y, min_z, max_x, max_y, max_z
 
     -- Write back to map
     vm:set_data(data)
-    vm:write_to_map(true)
+    vm:write_to_map()
     vm:update_map()
+
+    minetest.log("action", "[voxel_automata] VoxelManip: Placed " .. placed_count .. " nodes at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
 end
-]]
 
 -- ============================================================================
 -- Initialization and Testing
@@ -334,6 +341,82 @@ minetest.register_chatcommand("ca_render", {
         render_region_at_world(0, 0, 0, 16, 16, 16, world_x, world_y, world_z)
 
         return true, "Rendered automata grid at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")"
+    end
+})
+
+minetest.register_chatcommand("ca_render_vm", {
+    description = "Render automata grid using VoxelManip (bulk ops). Usage: /ca_render_vm [world_x] [world_y] [world_z]",
+    func = function(name, param)
+        local world_x, world_y, world_z = param:match("([^ ]+) ([^ ]+) ([^ ]+)")
+
+        if not world_x or not world_y or not world_z then
+            -- If no args, use player position rounded to nearest 16-block boundary
+            local player = minetest.get_player_by_name(name)
+            if not player then
+                return false, "Player not found"
+            end
+
+            local pos = player:get_pos()
+            world_x = math.floor(pos.x / 16) * 16
+            world_y = math.floor(pos.y / 16) * 16
+            world_z = math.floor(pos.z / 16) * 16
+        else
+            world_x = tonumber(world_x)
+            world_y = tonumber(world_y)
+            world_z = tonumber(world_z)
+        end
+
+        -- Extract from automaton grid (0-15) and place at world coordinates using VoxelManip
+        local start_time = minetest.get_us_time()
+        render_region_at_world_voxelmanip(0, 0, 0, 16, 16, 16, world_x, world_y, world_z)
+        local elapsed = (minetest.get_us_time() - start_time) / 1000  -- Convert to milliseconds
+
+        minetest.chat_send_player(name, string.format("[voxel_automata] VoxelManip render completed in %.2f ms", elapsed))
+        return true, "VoxelManip rendered automata grid at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")"
+    end
+})
+
+minetest.register_chatcommand("ca_render_bench", {
+    description = "Benchmark both rendering methods. Usage: /ca_render_bench [world_x] [world_y] [world_z]",
+    func = function(name, param)
+        local world_x, world_y, world_z = param:match("([^ ]+) ([^ ]+) ([^ ]+)")
+
+        if not world_x or not world_y or not world_z then
+            -- If no args, use player position rounded to nearest 16-block boundary
+            local player = minetest.get_player_by_name(name)
+            if not player then
+                return false, "Player not found"
+            end
+
+            local pos = player:get_pos()
+            world_x = math.floor(pos.x / 16) * 16
+            world_y = math.floor(pos.y / 16) * 16
+            world_z = math.floor(pos.z / 16) * 16
+        else
+            world_x = tonumber(world_x)
+            world_y = tonumber(world_y)
+            world_z = tonumber(world_z)
+        end
+
+        minetest.chat_send_player(name, "[voxel_automata] Benchmarking at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
+
+        -- Test direct node placement
+        local start_direct = minetest.get_us_time()
+        render_region_at_world(0, 0, 0, 16, 16, 16, world_x, world_y, world_z)
+        local elapsed_direct = (minetest.get_us_time() - start_direct) / 1000
+
+        -- Test VoxelManip
+        local start_vm = minetest.get_us_time()
+        render_region_at_world_voxelmanip(0, 0, 0, 16, 16, 16, world_x + 20, world_y, world_z)
+        local elapsed_vm = (minetest.get_us_time() - start_vm) / 1000
+
+        local speedup = elapsed_direct / elapsed_vm
+
+        minetest.chat_send_player(name, string.format("Direct node placement: %.2f ms", elapsed_direct))
+        minetest.chat_send_player(name, string.format("VoxelManip bulk ops:   %.2f ms", elapsed_vm))
+        minetest.chat_send_player(name, string.format("Speedup: %.2fx", speedup))
+
+        return true, "Benchmark complete"
     end
 })
 
