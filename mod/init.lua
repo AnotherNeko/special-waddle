@@ -366,7 +366,7 @@ end
 minetest.log("action", "[voxel_automata] Phase 6: Created 16x16x16 field (diffusion_rate=2)")
 
 -- Set a point source
-va.va_field_set(global_field, 8, 8, 8, 1_000_000)
+va.va_field_set(global_field, 8, 8, 8, 1000000)
 local initial_value = va.va_field_get(global_field, 8, 8, 8)
 minetest.log("action", "[voxel_automata] Phase 6: Set point source to " .. initial_value)
 
