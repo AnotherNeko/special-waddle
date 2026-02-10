@@ -27,8 +27,10 @@ pub mod ffi;
 pub mod state;
 
 // Re-export public FFI API for C bindings
+pub use automaton::Field;
 pub use ffi::{
-    va_add, va_create, va_create_grid, va_destroy, va_extract_region, va_get_cell,
-    va_get_generation, va_import_region, va_set_cell, va_step,
+    va_add, va_create, va_create_field, va_create_grid, va_destroy, va_extract_region,
+    va_field_get, va_field_set, va_field_step, va_get_cell, va_get_generation, va_import_region,
+    va_set_cell, va_step,
 };
 pub use state::State;

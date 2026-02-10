@@ -39,6 +39,15 @@ ffi.cdef[[
     uint64_t va_import_region(State* ptr, const uint8_t* in_buf,
                                int16_t min_x, int16_t min_y, int16_t min_z,
                                int16_t max_x, int16_t max_y, int16_t max_z);
+
+    // Phase 6: Integer Field + Delta Diffusion
+    typedef struct Field Field;
+    Field* va_create_field(int16_t width, int16_t height, int16_t depth, uint8_t diffusion_rate);
+    void va_destroy_field(Field* ptr);
+    void va_field_set(Field* ptr, int16_t x, int16_t y, int16_t z, uint32_t value);
+    uint32_t va_field_get(const Field* ptr, int16_t x, int16_t y, int16_t z);
+    void va_field_step(Field* ptr);
+    uint64_t va_field_get_generation(const Field* ptr);
 ]]
 
 -- Load the Rust library
@@ -346,6 +355,37 @@ minetest.log("action", "[voxel_automata] Phase 3: Initial alive count = " .. ali
 -- Store for /ca_test command
 local alive_count_after = alive_count
 
+-- ============================================================================
+-- Phase 6 test: Integer Field + Delta Diffusion
+-- ============================================================================
+
+local global_field = va.va_create_field(16, 16, 16, 2)
+if global_field == nil then
+    error("[voxel_automata] Failed to create field")
+end
+minetest.log("action", "[voxel_automata] Phase 6: Created 16x16x16 field (diffusion_rate=2)")
+
+-- Set a point source
+va.va_field_set(global_field, 8, 8, 8, 1_000_000)
+local initial_value = va.va_field_get(global_field, 8, 8, 8)
+minetest.log("action", "[voxel_automata] Phase 6: Set point source to " .. initial_value)
+
+-- Step once and check diffusion
+va.va_field_step(global_field)
+local center_after = va.va_field_get(global_field, 8, 8, 8)
+local neighbor_x = va.va_field_get(global_field, 7, 8, 8)
+local neighbor_y = va.va_field_get(global_field, 8, 7, 8)
+local neighbor_z = va.va_field_get(global_field, 8, 8, 7)
+
+minetest.log("action", "[voxel_automata] Phase 6: After 1 step:")
+minetest.log("action", "  Center (8,8,8): " .. center_after)
+minetest.log("action", "  Neighbor X (7,8,8): " .. neighbor_x)
+minetest.log("action", "  Neighbor Y (8,7,8): " .. neighbor_y)
+minetest.log("action", "  Neighbor Z (8,8,7): " .. neighbor_z)
+
+local gen = va.va_field_get_generation(global_field)
+minetest.log("action", "[voxel_automata] Phase 6: Field generation = " .. tonumber(gen))
+
 minetest.log("action", "[voxel_automata] Loaded successfully!")
 
 -- ============================================================================
@@ -585,5 +625,10 @@ minetest.register_on_shutdown(function()
         minetest.log("action", "[voxel_automata] Destroying state on shutdown")
         va.va_destroy(global_state)
         global_state = nil
+    end
+    if global_field ~= nil then
+        minetest.log("action", "[voxel_automata] Destroying field on shutdown")
+        va.va_destroy_field(global_field)
+        global_field = nil
     end
 end)
