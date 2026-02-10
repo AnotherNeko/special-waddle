@@ -1,14 +1,11 @@
 //! Integer field with delta-based diffusion.
 //!
-//! Implements conservation-safe diffusion on integer grids using the delta grid approach:
-//! - Compute flow (delta) between each adjacent cell pair per axis
-//! - Apply symmetrically: cell[i] -= delta; cell[i+1] += delta
-//! - This ensures conservation by Newton's third law regardless of rounding
-//!
-//! One DeltaGrid per axis (dx, dy, dz), computed independently.
-//! dy includes optional gravity bias for pressure/buoyancy effects.
-
-use crate::automaton::grid::in_bounds;
+//! Implements conservation-safe diffusion on integer grids:
+//! - Process each axis independently (X, Y, Z)
+//! - For each adjacent cell pair, compute flow = (cell_a - cell_b) / divisor
+//! - Apply symmetrically: cell_a -= flow, cell_b += flow
+//! - This ensures conservation by Newton's third law
+//! - Copy result back to field before next axis (prevents over-application)
 
 /// A 3D field of u32 values.
 /// Used for dense simulations like weather, thermal diffusion, or chemistry.
@@ -19,52 +16,6 @@ pub struct Field {
     pub cells: Vec<u32>, // u32 per cell (e.g. centigrams, microkelvin)
     pub generation: u64,
     pub diffusion_rate: u8, // power-of-2 shift (e.g. 3 = divide by 8)
-}
-
-/// Flow deltas along one axis (signed i32 for each adjacent pair).
-/// Layout: for axis X, delta[y][z][x] = flow from cell[x] to cell[x+1]
-/// We flatten this to: delta_index = z * height * width + y * width + x
-struct DeltaGrid {
-    deltas: Vec<i32>,
-    width: i16,
-    height: i16,
-    depth: i16,
-}
-
-impl DeltaGrid {
-    fn new(width: i16, height: i16, depth: i16) -> Self {
-        let size = (width as usize) * (height as usize) * (depth as usize);
-        DeltaGrid {
-            deltas: vec![0; size],
-            width,
-            height,
-            depth,
-        }
-    }
-
-    #[inline]
-    fn index_of(&self, x: i16, y: i16, z: i16) -> usize {
-        z as usize * self.height as usize * self.width as usize
-            + y as usize * self.width as usize
-            + x as usize
-    }
-
-    #[inline]
-    fn get(&self, x: i16, y: i16, z: i16) -> i32 {
-        if x < 0 || x >= self.width || y < 0 || y >= self.height || z < 0 || z >= self.depth {
-            0
-        } else {
-            self.deltas[self.index_of(x, y, z)]
-        }
-    }
-
-    #[inline]
-    fn set(&mut self, x: i16, y: i16, z: i16, value: i32) {
-        if x >= 0 && x < self.width && y >= 0 && y < self.height && z >= 0 && z < self.depth {
-            let idx = self.index_of(x, y, z);
-            self.deltas[idx] = value;
-        }
-    }
 }
 
 /// Initialize a field with the given dimensions and diffusion rate.
@@ -112,9 +63,9 @@ pub fn field_get(field: &Field, x: i16, y: i16, z: i16) -> u32 {
     }
 }
 
-/// Step the field forward by one generation using delta-based diffusion.
-/// Computes three delta grids (dx, dy, dz) independently, then applies them in-place.
-/// dy includes optional gravity bias for pressure/buoyancy effects.
+/// Step the field forward by one generation using axis-aligned diffusion.
+/// Processes each axis (X, Y, Z) independently, computing and applying flows inline.
+/// Between axes, copies results back to preserve conservation.
 pub fn field_step(field: &mut Field) {
     let rate = field.diffusion_rate;
     let divisor = 1u32 << rate; // 2^rate
