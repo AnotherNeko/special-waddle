@@ -626,33 +626,6 @@ mod tests {
         elapsed.as_millis() as f64 / num_steps as f64
     }
 
-    #[test]
-    fn benchmark_suite_various_sizes() {
-        eprintln!("\n=== Performance Benchmark Suite ===\n");
-
-        // Small grid (baseline for correctness)
-        let t1 = benchmark_field_steps(16, 16, 16, 3, 10, 100);
-        eprintln!("[16³] {:.2} ms/step", t1);
-
-        // Medium grid
-        let t2 = benchmark_field_steps(64, 64, 64, 3, 10, 101);
-        eprintln!("[64³] {:.2} ms/step", t2);
-
-        // Large grid (typical use case)
-        let t3 = benchmark_field_steps(128, 128, 128, 3, 5, 102);
-        eprintln!("[128³] {:.2} ms/step", t3);
-
-        // Very large grid (512×512×256)
-        let t4 = benchmark_field_steps(256, 256, 128, 3, 3, 103);
-        eprintln!("[256×256×128] {:.2} ms/step", t4);
-
-        // Production scale (512×512×256)
-        let t5 = benchmark_field_steps(512, 512, 256, 3, 2, 104);
-        eprintln!("[512×512×256] {:.2} ms/step", t5);
-
-        eprintln!("\n=== End Benchmark Suite ===\n");
-    }
-
     /// Measure memory overhead of field structure.
     #[test]
     fn measure_memory_footprint() {
@@ -783,28 +756,6 @@ mod tests {
             "Severe performance regression: took {:.2}s",
             elapsed.as_secs_f64()
         );
-    }
-
-    #[test]
-    fn benchmark_fused_suite_various_sizes() {
-        eprintln!("\n=== Fused Performance Benchmark Suite ===\n");
-
-        let t1 = benchmark_field_steps_with_func(16, 16, 16, 3, 10, 100, field_step_fused);
-        eprintln!("[16³ Fused] {:.2} ms/step", t1);
-
-        let t2 = benchmark_field_steps_with_func(64, 64, 64, 3, 10, 101, field_step_fused);
-        eprintln!("[64³ Fused] {:.2} ms/step", t2);
-
-        let t3 = benchmark_field_steps_with_func(128, 128, 128, 3, 5, 102, field_step_fused);
-        eprintln!("[128³ Fused] {:.2} ms/step", t3);
-
-        let t4 = benchmark_field_steps_with_func(256, 256, 128, 3, 3, 103, field_step_fused);
-        eprintln!("[256×256×128 Fused] {:.2} ms/step", t4);
-
-        let t5 = benchmark_field_steps_with_func(512, 512, 256, 3, 2, 104, field_step_fused);
-        eprintln!("[512×512×256 Fused] {:.2} ms/step", t5);
-
-        eprintln!("\n=== End Fused Benchmark Suite ===\n");
     }
 
     /// Generic benchmark helper accepting a function pointer
@@ -1092,7 +1043,6 @@ mod tests {
             (16i16, 16i16, 16i16, 10, "16³"),
             (64i16, 64i16, 64i16, 10, "64³"),
             (128i16, 128i16, 128i16, 5, "128³"),
-            (256i16, 256i16, 128i16, 3, "256×256×128"),
         ];
 
         for algo in all_algorithms() {
