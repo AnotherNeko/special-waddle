@@ -466,6 +466,7 @@ mod tests {
     fn test_algorithm_comparison_truth_128cubed() {
         // Test that all algorithms produce correct results compared to fused (null hypothesis).
         // Fused is our baseline for correctness. Any algorithm not matching fused fails this test.
+        // Collects all failures and reports them together.
         let width = 128i16;
         let height = 128i16;
         let depth = 128i16;
@@ -481,6 +482,8 @@ mod tests {
             field_step_fused(&mut baseline_field);
         }
 
+        let mut failures = Vec::new();
+
         for algo in all_algorithms() {
             let mut field = create_field(width, height, depth, diffusion_rate);
             field.cells = reference_cells.clone();
@@ -491,20 +494,33 @@ mod tests {
 
             // Check conservation
             let actual_sum: u64 = field.cells.iter().map(|&v| v as u64).sum();
-            assert_eq!(
-                actual_sum, expected_sum,
-                "Algorithm '{}' failed conservation: {} != {}",
-                algo.name, actual_sum, expected_sum
-            );
+            if actual_sum != expected_sum {
+                failures.push(format!(
+                    "Algorithm '{}' failed conservation: {} != {}",
+                    algo.name, actual_sum, expected_sum
+                ));
+            }
 
             // Check truth: algorithm must match fused baseline (Ho)
-            if algo.name != "fused" {
-                assert!(
-                    fields_equal(&field, &baseline_field),
+            if algo.name != "fused" && !fields_equal(&field, &baseline_field) {
+                failures.push(format!(
                     "Algorithm '{}' result differs from fused baseline (Ho)",
                     algo.name
-                );
+                ));
             }
+        }
+
+        if !failures.is_empty() {
+            eprintln!("\n=== Algorithm Comparison Failures ===");
+            for failure in &failures {
+                eprintln!("  ✗ {}", failure);
+            }
+            eprintln!();
+            panic!(
+                "Algorithm comparison failed ({} issues):\n{}",
+                failures.len(),
+                failures.join("\n")
+            );
         }
     }
 
