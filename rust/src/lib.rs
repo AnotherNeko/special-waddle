@@ -1,31 +1,34 @@
 //! Voxel Automata - 3D Cellular Automata Library
 //!
-//! This library provides a C ABI for use with LuaJIT FFI in Luanti.
+//! A Rust cdylib + Luanti mod for testing complex voxel-world simulations.
 //!
 //! ## Module Structure
 //!
-//! - `state`: Core state structure and helper methods
-//! - `phase1`: FFI bridge proof (simple addition)
-//! - `phase2`: Opaque handle lifecycle (create, destroy, generation)
-//! - `phase3`: Grid and stepping (B4/S4 cellular automaton)
-//! - `phase4`: Visualization (region extraction)
-//! - `phase5`: Bidirectional sync (region import)
+//! - **`state`**: Core opaque State type (pure data structure)
+//! - **`automaton`**: Core simulation logic
+//!   - `grid`: Grid operations (index calculation, bounds checking, neighbor counting)
+//!   - `stepping`: Cellular automaton stepping with B4/S4 rules
+//!   - `region`: Region extraction and import
+//! - **`ffi`**: C ABI interface for LuaJIT
+//!   - `simple`: va_add (FFI proof of concept)
+//!   - `lifecycle`: va_create, va_destroy, va_get_generation
+//!   - `grid`: va_create_grid, va_set_cell, va_get_cell, va_step
+//!   - `region`: va_extract_region, va_import_region
+//!
+//! ## Design
+//!
+//! The library separates concerns:
+//! - **Core logic** in `automaton` is tested directly (no FFI overhead)
+//! - **FFI layer** is minimal, just wrapping core logic with null checks and pointer safety
+//! - **Tests** are co-located with their implementations for clarity
 
+pub mod automaton;
+pub mod ffi;
 pub mod state;
 
-mod phase1;
-mod phase2;
-mod phase3;
-mod phase4;
-mod phase5;
-
-#[cfg(test)]
-mod tests;
-
-// Re-export public FFI API
-pub use phase1::va_add;
-pub use phase2::{va_create, va_destroy, va_get_generation};
-pub use phase3::{va_create_grid, va_get_cell, va_set_cell, va_step};
-pub use phase4::va_extract_region;
-pub use phase5::va_import_region;
+// Re-export public FFI API for C bindings
+pub use ffi::{
+    va_add, va_create, va_create_grid, va_destroy, va_extract_region, va_get_cell,
+    va_get_generation, va_import_region, va_set_cell, va_step,
+};
 pub use state::State;
