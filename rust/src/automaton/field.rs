@@ -464,8 +464,8 @@ mod tests {
 
     #[test]
     fn test_algorithm_comparison_truth_128cubed() {
-        // Test that all algorithms produce correct diffusion behavior.
-        // noop will fail this test (expected) because it doesn't actually change the field.
+        // Test that all algorithms produce correct results compared to fused (null hypothesis).
+        // Fused is our baseline for correctness. Any algorithm not matching fused fails this test.
         let width = 128i16;
         let height = 128i16;
         let depth = 128i16;
@@ -474,11 +474,14 @@ mod tests {
         let reference_cells = generate_noisy_state(width, height, depth, 42);
         let expected_sum: u64 = reference_cells.iter().map(|&v| v as u64).sum();
 
-        for algo in all_algorithms() {
-            // Store initial state before algorithm runs
-            let mut initial_state_field = create_field(width, height, depth, diffusion_rate);
-            initial_state_field.cells = reference_cells.clone();
+        // Generate baseline (fused algorithm = null hypothesis)
+        let mut baseline_field = create_field(width, height, depth, diffusion_rate);
+        baseline_field.cells = reference_cells.clone();
+        for _ in 0..4 {
+            field_step_fused(&mut baseline_field);
+        }
 
+        for algo in all_algorithms() {
             let mut field = create_field(width, height, depth, diffusion_rate);
             field.cells = reference_cells.clone();
 
@@ -494,12 +497,14 @@ mod tests {
                 algo.name, actual_sum, expected_sum
             );
 
-            // Check truth: algorithm must change the field from its initial state
-            assert!(
-                !fields_equal(&field, &initial_state_field),
-                "Algorithm '{}' did not change field after 4 steps (noop behavior)",
-                algo.name
-            );
+            // Check truth: algorithm must match fused baseline (Ho)
+            if algo.name != "fused" {
+                assert!(
+                    fields_equal(&field, &baseline_field),
+                    "Algorithm '{}' result differs from fused baseline (Ho)",
+                    algo.name
+                );
+            }
         }
     }
 
