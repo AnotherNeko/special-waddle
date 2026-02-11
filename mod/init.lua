@@ -48,6 +48,18 @@ ffi.cdef[[
     uint32_t va_field_get(const Field* ptr, int16_t x, int16_t y, int16_t z);
     void va_field_step(Field* ptr);
     uint64_t va_field_get_generation(const Field* ptr);
+
+    // Phase 8a: Non-blocking incremental stepping
+    typedef struct StepController StepController;
+    StepController* va_create_step_controller(int16_t w, int16_t h, int16_t d, uint8_t diffusion_rate, uint8_t num_threads);
+    void va_destroy_step_controller(StepController* ctrl);
+    void va_sc_field_set(StepController* ctrl, int16_t x, int16_t y, int16_t z, uint32_t value);
+    uint32_t va_sc_field_get(const StepController* ctrl, int16_t x, int16_t y, int16_t z);
+    uint64_t va_sc_field_get_generation(const StepController* ctrl);
+    int32_t va_sc_begin_step(StepController* ctrl);
+    int32_t va_sc_tick(StepController* ctrl, uint64_t budget_us);
+    int32_t va_sc_is_stepping(const StepController* ctrl);
+    void va_sc_step_blocking(StepController* ctrl);
 ]]
 
 -- Load the Rust library
@@ -93,6 +105,7 @@ local animation_state = {
     running = false,
     interval = 1.0,  -- seconds between steps
     timer = 0.0,
+    field_stepping = false,  -- Phase 8a: track if StepController is mid-step
 }
 
 -- Phase 4/5: Register node type for visualization with interaction callbacks
@@ -126,6 +139,34 @@ minetest.register_on_placenode(function(pos, newnode, placer, oldnode, itemstack
         end
     end
 end)
+
+-- ============================================================================
+-- Phase 8b: Register 256 grayscale nodes for u32 field visualization
+-- ============================================================================
+-- Mapping: u32 value (0 to 4,294,967,295) → grayscale (0 to 255)
+-- Formula: grayscale = math.floor(value / 16777216)  -- divide by 2^24
+
+for i = 0, 255 do
+    local brightness = i / 255.0
+    local node_name = string.format("voxel_automata:mass_%03d", i)
+
+    minetest.register_node(node_name, {
+        description = string.format("Mass Field (level %d/255)", i),
+        tiles = {{
+            name = "voxel_automata_grayscale.png",
+            color = {r = brightness * 255, g = brightness * 255, b = brightness * 255},
+        }},
+        paramtype = "light",
+        light_source = 0,
+        sunlight_propagates = true,
+        walkable = false,
+        pointable = false,
+        buildable_to = true,
+        groups = {not_in_creative_inventory = 1},
+    })
+end
+
+minetest.log("action", "[voxel_automata] Phase 8b: Registered 256 grayscale mass nodes")
 
 -- Helper function to render a region using individual node placement
 -- TODO: Replace with VoxelManip variant once timing issues are resolved
@@ -386,15 +427,127 @@ minetest.log("action", "  Neighbor Z (8,8,7): " .. neighbor_z)
 local gen = va.va_field_get_generation(global_field)
 minetest.log("action", "[voxel_automata] Phase 6: Field generation = " .. tonumber(gen))
 
+-- ============================================================================
+-- Phase 8a: Create StepController for non-blocking field stepping
+-- ============================================================================
+
+local global_step_controller = va.va_create_step_controller(16, 16, 16, 2, 1)
+if global_step_controller == nil then
+    error("[voxel_automata] Failed to create step controller")
+end
+minetest.log("action", "[voxel_automata] Phase 8a: Created StepController (16x16x16, diffusion_rate=2, 1 thread)")
+
+-- Set a point source for testing at corner (0,0,0) with max brightness
+-- u32 max value = 4,294,967,295 (maps to grayscale 255, white)
+va.va_sc_field_set(global_step_controller, 0, 0, 0, 4294967295)
+local sc_initial_value = va.va_sc_field_get(global_step_controller, 0, 0, 0)
+minetest.log("action", "[voxel_automata] Phase 8a: Set point source to " .. sc_initial_value)
+
+-- ============================================================================
+-- Phase 8b: Render u32 field as grayscale blocks
+-- ============================================================================
+
+local function render_field_grayscale()
+    if not global_step_controller then
+        return
+    end
+
+    -- Define field viewport (offset from CA viewport for clarity)
+    local field_anchor = {
+        x = viewport_anchor.x,
+        y = viewport_anchor.y + 50,
+        z = viewport_anchor.z
+    }
+
+    local field_size = 16  -- Match StepController dimensions
+
+    -- Calculate world bounds
+    local world_min = field_anchor
+    local world_max = {
+        x = field_anchor.x + field_size - 1,
+        y = field_anchor.y + field_size - 1,
+        z = field_anchor.z + field_size - 1
+    }
+
+    -- Create VoxelManip for bulk writing
+    local vm = VoxelManip()
+    local emerged_min, emerged_max = vm:read_from_map(world_min, world_max)
+    local data = vm:get_data()
+    local area = VoxelArea:new({MinEdge = emerged_min, MaxEdge = emerged_max})
+
+    -- Pre-cache grayscale node content IDs
+    local grayscale_ids = {}
+    for i = 0, 255 do
+        local node_name = string.format("voxel_automata:mass_%03d", i)
+        grayscale_ids[i] = minetest.get_content_id(node_name)
+    end
+    local air_id = minetest.get_content_id("air")
+
+    -- Read field data and map to grayscale nodes
+    local nonzero_count = 0
+    for z = 0, field_size - 1 do
+        for y = 0, field_size - 1 do
+            for x = 0, field_size - 1 do
+                local value = va.va_sc_field_get(global_step_controller, x, y, z)
+
+                -- Map u32 to 0-255 grayscale
+                local grayscale = math.floor(value / 16777216)  -- Divide by 2^24
+                if grayscale > 255 then grayscale = 255 end
+
+                local world_pos = {
+                    x = field_anchor.x + x,
+                    y = field_anchor.y + y,
+                    z = field_anchor.z + z
+                }
+                local vi = area:indexp(world_pos)
+
+                -- Place grayscale node if nonzero, air if zero
+                data[vi] = grayscale > 0 and grayscale_ids[grayscale] or air_id
+
+                if value > 0 then
+                    nonzero_count = nonzero_count + 1
+                end
+            end
+        end
+    end
+
+    -- Write back to map
+    vm:set_data(data)
+    vm:write_to_map()
+    vm:update_map()
+
+    minetest.log("action", string.format("[voxel_automata] Field rendered: %d/%d cells nonzero",
+        nonzero_count, field_size * field_size * field_size))
+end
+
 minetest.log("action", "[voxel_automata] Loaded successfully!")
 
 -- ============================================================================
 -- Phase 5: Animation System
 -- ============================================================================
 
--- Globalstep callback for automatic stepping and rendering
+-- Globalstep callback for automatic stepping and non-blocking field rendering
 minetest.register_globalstep(function(dtime)
-    if not animation_state.running or not global_state then
+    if not global_state or not global_step_controller then
+        return
+    end
+
+    -- Phase 8a: Handle ongoing incremental step (non-blocking work)
+    if animation_state.field_stepping then
+        local done = va.va_sc_tick(global_step_controller, 4000)  -- 4ms budget per tick
+        if done == 1 then
+            animation_state.field_stepping = false
+            local gen = va.va_sc_field_get_generation(global_step_controller)
+            minetest.log("action", "[voxel_automata] Incremental step completed: generation " .. tonumber(gen))
+
+            -- Phase 8b: Render field after step completes
+            render_field_grayscale()
+        end
+        return  -- Continue processing this step, don't start new work
+    end
+
+    -- Animation timer logic (only if not mid-step)
+    if not animation_state.running then
         return
     end
 
@@ -403,10 +556,26 @@ minetest.register_globalstep(function(dtime)
     if animation_state.timer >= animation_state.interval then
         animation_state.timer = 0
 
-        -- Step the automaton
+        -- Step the cellular automaton (still blocking, Phase 3 behavior)
         va.va_step(global_state)
 
-        -- Render using VoxelManip at viewport anchor
+        -- Phase 8a: Begin new incremental field step (non-blocking)
+        local result = va.va_sc_begin_step(global_step_controller)
+        if result == 0 then  -- 0 = success
+            animation_state.field_stepping = true
+            -- Do first tick of work immediately (avoid one-frame delay)
+            local done = va.va_sc_tick(global_step_controller, 4000)
+            if done == 1 then
+                animation_state.field_stepping = false
+                local gen = va.va_sc_field_get_generation(global_step_controller)
+                minetest.log("action", "[voxel_automata] Incremental step completed immediately: generation " .. tonumber(gen))
+
+                -- Phase 8b: Render field after step completes
+                render_field_grayscale()
+            end
+        end
+
+        -- Render the cellular automaton using VoxelManip at viewport anchor
         render_region_at_world_voxelmanip(
             0, 0, 0,
             grid_size, grid_size, grid_size,
@@ -414,7 +583,7 @@ minetest.register_globalstep(function(dtime)
         )
 
         local gen = va.va_get_generation(global_state)
-        minetest.log("action", "[voxel_automata] Animation step: generation " .. tonumber(gen))
+        minetest.log("action", "[voxel_automata] Animation step: CA generation " .. tonumber(gen))
     end
 end)
 
@@ -619,6 +788,65 @@ minetest.register_chatcommand("va_pull", {
     end
 })
 
+-- ============================================================================
+-- Phase 8b: Field visualization and debugging commands
+-- ============================================================================
+
+-- /va_show_field: Manually render field for debugging
+minetest.register_chatcommand("va_show_field", {
+    description = "Render u32 field as grayscale blocks",
+    func = function(name, param)
+        if not global_step_controller then
+            return false, "No StepController available"
+        end
+
+        local start_time = minetest.get_us_time()
+        render_field_grayscale()
+        local elapsed = (minetest.get_us_time() - start_time) / 1000
+
+        local gen = va.va_sc_field_get_generation(global_step_controller)
+        minetest.chat_send_player(name, string.format("[voxel_automata] Field rendered in %.2f ms (generation %d)",
+            elapsed, tonumber(gen)))
+        return true, "Field rendered"
+    end
+})
+
+-- /va_field_info: Show StepController and field visualization status
+minetest.register_chatcommand("va_field_info", {
+    description = "Show StepController and field visualization status",
+    func = function(name, param)
+        if not global_step_controller then
+            return false, "No StepController available"
+        end
+
+        local is_stepping = va.va_sc_is_stepping(global_step_controller)
+        local generation = va.va_sc_field_get_generation(global_step_controller)
+
+        -- Calculate total field mass
+        local total_mass = 0
+        for z = 0, 15 do
+            for y = 0, 15 do
+                for x = 0, 15 do
+                    total_mass = total_mass + va.va_sc_field_get(global_step_controller, x, y, z)
+                end
+            end
+        end
+
+        -- Sample corner cell
+        local corner_value = va.va_sc_field_get(global_step_controller, 0, 0, 0)
+        local corner_grayscale = math.floor(corner_value / 16777216)
+
+        minetest.chat_send_player(name, "[voxel_automata] Generation: " .. tonumber(generation))
+        minetest.chat_send_player(name, "[voxel_automata] Currently stepping: " .. (is_stepping == 1 and "yes" or "no"))
+        minetest.chat_send_player(name, "[voxel_automata] Lua field_stepping flag: " .. tostring(animation_state.field_stepping))
+        minetest.chat_send_player(name, string.format("[voxel_automata] Total mass: %d", total_mass))
+        minetest.chat_send_player(name, string.format("[voxel_automata] Corner cell (0,0,0): value=%d, grayscale=%d",
+            corner_value, corner_grayscale))
+
+        return true, "Info displayed"
+    end
+})
+
 -- Cleanup on shutdown
 minetest.register_on_shutdown(function()
     if global_state ~= nil then
@@ -630,5 +858,10 @@ minetest.register_on_shutdown(function()
         minetest.log("action", "[voxel_automata] Destroying field on shutdown")
         va.va_destroy_field(global_field)
         global_field = nil
+    end
+    if global_step_controller ~= nil then
+        minetest.log("action", "[voxel_automata] Destroying step controller on shutdown")
+        va.va_destroy_step_controller(global_step_controller)
+        global_step_controller = nil
     end
 end)
