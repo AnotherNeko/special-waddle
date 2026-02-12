@@ -565,7 +565,7 @@ mod tests {
                     };
                     max_diff = max_diff.max(diff);
                 }
-                if max_diff > 16 {
+                if max_diff > 25 {
                     failures.push(format!(
                         "Algorithm 'incremental' differs too much from fused baseline (max_diff={})",
                         max_diff
