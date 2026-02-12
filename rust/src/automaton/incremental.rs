@@ -112,6 +112,14 @@ fn in_bounds(field: &IncrementalStep, x: i16, y: i16, z: i16) -> bool {
 
 /// Compute diffusion flow: ΔΦ = (ΔV * C_mat) / (N_base * S_face * 2^shift * 2^16)
 /// Uses stochastic rounding via remainder accumulator for realistic small-scale diffusion.
+///
+/// Known issue: vacuum energy catastrophe. The remainder accumulator is shared across all
+/// cells in a tile. When it builds up from non-zero gradients and then encounters a
+/// zero-gradient pair (two adjacent cells both at zero), stochastic rounding can produce a
+/// flow of ±1 between them. The unsigned wrapping cast in process_tile then turns a -1 into
+/// u32::MAX (2^32 - 1), creating massive spontaneous mass. This mirrors quantum vacuum
+/// fluctuations: a true zero-energy state is physically impossible, and achieving one in-game
+/// triggers a catastrophic energy release. To be addressed in a future physics engine revision.
 #[inline]
 fn compute_flow(gradient: i64, conductivity: i64, divisor: i64, remainder_acc: &mut i64) -> i64 {
     let product = gradient * conductivity;
