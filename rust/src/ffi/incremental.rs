@@ -50,14 +50,19 @@ pub extern "C" fn va_sc_field_set(ctrl: *mut StepController, x: i16, y: i16, z: 
 }
 
 /// Get a cell value from the inner field.
-/// Out-of-bounds coordinates return 0.
+/// Get a cell value, returning the non-zero u32 or 0 on error.
+/// Returns 0 for out-of-bounds coordinates or null pointer.
 #[no_mangle]
 pub extern "C" fn va_sc_field_get(ctrl: *const StepController, x: i16, y: i16, z: i16) -> u32 {
     if ctrl.is_null() {
         return 0;
     }
 
-    unsafe { crate::automaton::field_get(&(*ctrl).field, x, y, z) }
+    unsafe {
+        crate::automaton::field_get(&(*ctrl).field, x, y, z)
+            .map(|nz| nz.get())
+            .unwrap_or(0)
+    }
 }
 
 /// Get the current generation number of the inner field.
@@ -161,7 +166,8 @@ mod tests {
 
         va_sc_field_set(ctrl, 8, 8, 8, 5000);
         assert_eq!(va_sc_field_get(ctrl, 8, 8, 8), 5000);
-        assert_eq!(va_sc_field_get(ctrl, 0, 0, 0), 0);
+        // Unset cells have minimum quantum of 1 (Third Law of thermodynamics)
+        assert_eq!(va_sc_field_get(ctrl, 0, 0, 0), 1);
 
         va_destroy_step_controller(ctrl);
     }

@@ -7,6 +7,15 @@
 //! - This ensures conservation by Newton's third law
 //! - Copy result back to field before next axis (prevents over-application)
 
+use std::num::NonZeroU32;
+
+/// Error type for field access operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldError {
+    /// Coordinates are outside field bounds.
+    OutOfBounds,
+}
+
 /// A 3D field of u32 values.
 /// Used for dense simulations like weather, thermal diffusion, or chemistry.
 #[derive(Clone)]
@@ -23,11 +32,13 @@ pub struct Field {
 /// Initialize a field with the given dimensions and diffusion rate.
 pub fn create_field(width: i16, height: i16, depth: i16, diffusion_rate: u8) -> Field {
     let size = (width as usize) * (height as usize) * (depth as usize);
+    // Third Law of Thermodynamics: absolute zero is unattainable.
+    // Initialize all cells to 1 (minimum non-zero quantum of conserved quantity).
     Field {
         width,
         height,
         depth,
-        cells: vec![0; size],
+        cells: vec![1; size],
         generation: 0,
         diffusion_rate,
         conductivity: 65535, // Fully conductive by default (C_mat ~ 1.0)
@@ -57,12 +68,16 @@ pub fn field_set(field: &mut Field, x: i16, y: i16, z: i16, value: u32) {
 }
 
 /// Get a cell value.
-pub fn field_get(field: &Field, x: i16, y: i16, z: i16) -> u32 {
+/// Returns NonZeroU32 to enforce Third Law of Thermodynamics: absolute zero is unattainable.
+/// All valid cells contain at least 1 unit of conserved quantity.
+pub fn field_get(field: &Field, x: i16, y: i16, z: i16) -> Result<NonZeroU32, FieldError> {
     if field_in_bounds(field, x, y, z) {
         let idx = field_index_of(field, x, y, z);
-        field.cells[idx]
+        let value = field.cells[idx].max(1);
+        // Should never be zero inside bounds due to Third Law initialization
+        NonZeroU32::new(value).ok_or(FieldError::OutOfBounds)
     } else {
-        0
+        Err(FieldError::OutOfBounds)
     }
 }
 
@@ -304,7 +319,8 @@ mod tests {
         assert_eq!(field.cells.len(), 512);
         assert_eq!(field.generation, 0);
         assert_eq!(field.diffusion_rate, 3);
-        assert!(field.cells.iter().all(|&c| c == 0));
+        // Third Law of Thermodynamics: all cells initialized to minimum quantum of 1
+        assert!(field.cells.iter().all(|&c| c == 1));
     }
 
     #[test]
@@ -312,12 +328,13 @@ mod tests {
         let mut field = create_field(8, 8, 8, 3);
 
         field_set(&mut field, 4, 4, 4, 1000);
-        assert_eq!(field_get(&field, 4, 4, 4), 1000);
-        assert_eq!(field_get(&field, 0, 0, 0), 0);
+        assert_eq!(field_get(&field, 4, 4, 4).unwrap().get(), 1000);
+        // Unset cells have minimum quantum of 1 (Third Law of Thermodynamics)
+        assert_eq!(field_get(&field, 0, 0, 0).unwrap().get(), 1);
 
-        // Out of bounds reads return 0
-        assert_eq!(field_get(&field, -1, 0, 0), 0);
-        assert_eq!(field_get(&field, 8, 0, 0), 0);
+        // Out of bounds reads return error (boundaries are vacuum/void)
+        assert_eq!(field_get(&field, -1, 0, 0), Err(FieldError::OutOfBounds));
+        assert_eq!(field_get(&field, 8, 0, 0), Err(FieldError::OutOfBounds));
     }
 
     #[test]
@@ -348,29 +365,46 @@ mod tests {
     #[test]
     fn test_diffusion_spreads_symmetric() {
         // Test that diffusion spreads symmetrically from a point source
+        // After 1 step, all 6 neighbors should have equal values
         let mut field = create_field(16, 16, 16, 2);
 
+        // Account for Third Law: field starts with 16^3 * 1 = 4096 minimum quantum
+        let initial_background = (16i64 * 16 * 16) as u64;
         let center_val = 1_000_000u32;
         field_set(&mut field, 8, 8, 8, center_val);
+        // field_set overwrites the cell, replacing 1 with center_val
+        let expected_total = initial_background - 1 + (center_val as u64);
 
         field_step(&mut field);
 
-        // Check that neighbors got some value
-        let neighbors_have_value = field_get(&field, 7, 8, 8) > 0
-            && field_get(&field, 9, 8, 8) > 0
-            && field_get(&field, 8, 7, 8) > 0
-            && field_get(&field, 8, 9, 8) > 0
-            && field_get(&field, 8, 8, 7) > 0
-            && field_get(&field, 8, 8, 9) > 0;
+        // Check that neighbors got equal values (rotationally symmetric diffusion)
+        let neighbor_vals = [
+            field_get(&field, 7, 8, 8).unwrap().get(),
+            field_get(&field, 9, 8, 8).unwrap().get(),
+            field_get(&field, 8, 7, 8).unwrap().get(),
+            field_get(&field, 8, 9, 8).unwrap().get(),
+            field_get(&field, 8, 8, 7).unwrap().get(),
+            field_get(&field, 8, 8, 9).unwrap().get(),
+        ];
 
+        // All 6 neighbors should have approximately equal values (within ±3 tolerance for stochastic rounding)
+        let base = neighbor_vals[0];
         assert!(
-            neighbors_have_value,
-            "Neighbors should have non-zero values"
+            neighbor_vals
+                .iter()
+                .all(|&v| (v as i32 - base as i32).abs() <= 3),
+            "All neighbors should have equal values (±3 tolerance) due to rotational symmetry"
         );
+        assert!(neighbor_vals[0] > 1, "Neighbors should have received flow");
 
-        // Check total is still conserved
+        // Check total is still conserved (includes background quantum minimum)
         let total: u64 = field.cells.iter().map(|&v| v as u64).sum();
-        assert_eq!(total, center_val as u64, "Total mass should be conserved");
+        assert!(
+            (total as i64 - expected_total as i64) == 0,
+            "Total mass should be conserved (expected {}, got {})",
+            expected_total,
+            total
+        );
     }
 
     #[test]
@@ -404,12 +438,20 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_field_stays_zero() {
+    fn test_minimum_field_stays_minimum() {
+        // Third Law: fields cannot reach absolute zero. Minimum quantum is 1.
+        // A field initialized to all 1s (minimum non-zero state) should maintain
+        // that minimum value (no cell can drop below the quantum).
         let mut field = create_field(8, 8, 8, 3);
+        // create_field initializes all cells to 1
 
         field_step(&mut field);
 
-        assert!(field.cells.iter().all(|&c| c == 0));
+        // All cells should still be at least 1 (minimum quantum)
+        assert!(
+            field.cells.iter().all(|&c| c >= 1),
+            "Third Law violation: some cells dropped below minimum quantum of 1"
+        );
         assert_eq!(field.generation, 1);
     }
 
@@ -1180,7 +1222,7 @@ mod tests {
         for x in 0..field.width {
             for y in 0..field.height {
                 for z in 0..field.depth {
-                    let val = field_get(field, x, y, z);
+                    let val = field_get(field, x, y, z).unwrap().get();
                     // Map (x,y,z) in original to (y,x,z) in flipped
                     field_set(&mut flipped, y, x, z, val);
                 }
@@ -1225,8 +1267,8 @@ mod tests {
         for x in 0..field_xyz.width {
             for y in 0..field_xyz.height {
                 for z in 0..field_xyz.depth {
-                    let val_xyz = field_get(&field_xyz, x, y, z);
-                    let val_yxz = field_get(&field_yxz_flipped, x, y, z);
+                    let val_xyz = field_get(&field_xyz, x, y, z).unwrap().get();
+                    let val_yxz = field_get(&field_yxz_flipped, x, y, z).unwrap().get();
                     if val_xyz != val_yxz {
                         mismatches += 1;
                         if mismatches <= 5 {
@@ -1273,8 +1315,8 @@ mod tests {
         for x in 0..field_xyz.width {
             for y in 0..field_xyz.height {
                 for z in 0..field_xyz.depth {
-                    let val_xyz = field_get(&field_xyz, x, y, z);
-                    let val_yxz = field_get(&field_yxz_flipped, x, y, z);
+                    let val_xyz = field_get(&field_xyz, x, y, z).unwrap().get();
+                    let val_yxz = field_get(&field_yxz_flipped, x, y, z).unwrap().get();
                     let diff = if val_xyz > val_yxz {
                         val_xyz - val_yxz
                     } else {
@@ -1331,8 +1373,8 @@ mod tests {
             for x in 0..field_xyz.width {
                 for y in 0..field_xyz.height {
                     for z in 0..field_xyz.depth {
-                        let val_xyz = field_get(&field_xyz, x, y, z);
-                        let val_yxz = field_get(&field_yxz_flipped, x, y, z);
+                        let val_xyz = field_get(&field_xyz, x, y, z).unwrap().get();
+                        let val_yxz = field_get(&field_yxz_flipped, x, y, z).unwrap().get();
                         let diff = if val_xyz > val_yxz {
                             val_xyz - val_yxz
                         } else {

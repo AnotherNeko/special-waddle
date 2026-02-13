@@ -9,6 +9,16 @@
 
 Use these paths when debugging Luanti issues. The flatpak's app data is at `~/.var/app/org.luanti.luanti/`.
 
+## Common Build Patterns
+
+### Rust Build Location
+
+The Cargo.toml is located at `rust/Cargo.toml`. Builds have been observed to fail when `cargo build` is run from the project root. Builds have succeeded when run from the `rust/` directory.
+
+### Library Linking
+
+A symlink is present at `mod/lib/libvoxel_automata.so` that points to `rust/target/release/libvoxel_automata.so`. The library has been observed to be automatically available to the Lua FFI after building without requiring manual file operations.
+
 ## Known Issues & Fixes
 
 ### Phase 4: Region Extraction Returns 0 Bytes

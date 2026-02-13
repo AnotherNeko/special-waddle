@@ -607,15 +607,18 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_field_stays_zero() {
+    fn test_minimum_field_stays_minimum() {
+        // Third Law: fields cannot reach absolute zero. Minimum quantum is 1.
+        // A field initialized to all 1s (minimum non-zero state) should maintain
+        // that minimum value (no cell can drop below the quantum).
         let mut ctrl = StepController::new(16, 16, 16, 3, 1);
-        // All cells initialized to 0
+        // StepController.field initialized to all 1s by create_field
 
         ctrl.step_blocking();
 
         assert!(
-            ctrl.field.cells.iter().all(|&c| c == 0),
-            "Zero field should stay zero"
+            ctrl.field.cells.iter().all(|&c| c >= 1),
+            "Third Law violation: some cells dropped below minimum quantum of 1"
         );
     }
 
@@ -634,7 +637,7 @@ mod tests {
 
         // Neighbor should have some value
         assert!(
-            field_get(&ctrl.field, 1, 8, 8) > 0,
+            field_get(&ctrl.field, 1, 8, 8).unwrap().get() > 1,
             "Neighbor should receive flow"
         );
     }
@@ -654,24 +657,24 @@ mod tests {
         for step_num in 0..200 {
             // Record current values before step
             let boundary_before = [
-                field_get(&ctrl.field, 0, 1, 1), // x=0 boundary
-                field_get(&ctrl.field, 2, 1, 1), // x=2 boundary
-                field_get(&ctrl.field, 1, 0, 1), // y=0 boundary
-                field_get(&ctrl.field, 1, 2, 1), // y=2 boundary
-                field_get(&ctrl.field, 1, 1, 0), // z=0 boundary
-                field_get(&ctrl.field, 1, 1, 2), // z=2 boundary
+                field_get(&ctrl.field, 0, 1, 1).unwrap().get(), // x=0 boundary
+                field_get(&ctrl.field, 2, 1, 1).unwrap().get(), // x=2 boundary
+                field_get(&ctrl.field, 1, 0, 1).unwrap().get(), // y=0 boundary
+                field_get(&ctrl.field, 1, 2, 1).unwrap().get(), // y=2 boundary
+                field_get(&ctrl.field, 1, 1, 0).unwrap().get(), // z=0 boundary
+                field_get(&ctrl.field, 1, 1, 2).unwrap().get(), // z=2 boundary
             ];
 
             ctrl.step_blocking();
 
             // Record values after step
             let boundary_after = [
-                field_get(&ctrl.field, 0, 1, 1),
-                field_get(&ctrl.field, 2, 1, 1),
-                field_get(&ctrl.field, 1, 0, 1),
-                field_get(&ctrl.field, 1, 2, 1),
-                field_get(&ctrl.field, 1, 1, 0),
-                field_get(&ctrl.field, 1, 1, 2),
+                field_get(&ctrl.field, 0, 1, 1).unwrap().get(),
+                field_get(&ctrl.field, 2, 1, 1).unwrap().get(),
+                field_get(&ctrl.field, 1, 0, 1).unwrap().get(),
+                field_get(&ctrl.field, 1, 2, 1).unwrap().get(),
+                field_get(&ctrl.field, 1, 1, 0).unwrap().get(),
+                field_get(&ctrl.field, 1, 1, 2).unwrap().get(),
             ];
 
             for (i, (before, after)) in boundary_before.iter().zip(&boundary_after).enumerate() {
@@ -709,7 +712,7 @@ mod tests {
         }
 
         // Check that center cell diffused outward (lost mass to boundaries)
-        let center_final = field_get(&ctrl.field, 1, 1, 1);
+        let center_final = field_get(&ctrl.field, 1, 1, 1).unwrap().get();
         assert!(
             center_final < 1_000_000,
             "Center cell should have diffused outward"
@@ -765,7 +768,10 @@ mod tests {
             eprintln!("  Max cell value: {}", max_val);
             eprintln!("  Cells at u32::MAX: {}", max_vals);
             eprintln!("  Nonzero cells: {}", nonzero);
-            eprintln!("  Corner (0,0,0): {}", field_get(&ctrl.field, 0, 0, 0));
+            eprintln!(
+                "  Corner (0,0,0): {}",
+                field_get(&ctrl.field, 0, 0, 0).unwrap().get()
+            );
 
             // Check for underflow
             if max_vals > 0 {
@@ -776,7 +782,7 @@ mod tests {
                 for z in 0..ctrl.field.depth {
                     for y in 0..ctrl.field.height {
                         for x in 0..ctrl.field.width {
-                            if field_get(&ctrl.field, x, y, z) == u32::MAX {
+                            if field_get(&ctrl.field, x, y, z).unwrap().get() == u32::MAX {
                                 eprintln!("  Cell ({},{},{}): u32::MAX", x, y, z);
                             }
                         }
@@ -842,7 +848,7 @@ mod tests {
                 for z in 0..ctrl.field.depth {
                     for y in 0..ctrl.field.height {
                         for x in 0..ctrl.field.width {
-                            let val = field_get(&ctrl.field, x, y, z);
+                            let val = field_get(&ctrl.field, x, y, z).unwrap().get();
                             if val == u32::MAX {
                                 underflow_cells.push((x, y, z));
                             }

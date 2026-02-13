@@ -44,14 +44,15 @@ pub extern "C" fn va_field_set(field: *mut Field, x: i16, y: i16, z: i16, value:
 }
 
 /// Get a cell value from the field.
-/// Out-of-bounds coordinates return 0.
+/// Get a cell value, returning the non-zero u32 or 0 on error.
+/// Returns 0 for out-of-bounds coordinates or null pointer.
 #[no_mangle]
 pub extern "C" fn va_field_get(field: *const Field, x: i16, y: i16, z: i16) -> u32 {
     if field.is_null() {
         return 0;
     }
 
-    unsafe { field_get(&*field, x, y, z) }
+    unsafe { field_get(&*field, x, y, z).map(|nz| nz.get()).unwrap_or(0) }
 }
 
 /// Step the field forward by one generation using delta-based diffusion.
@@ -103,7 +104,8 @@ mod tests {
 
         va_field_set(field, 4, 4, 4, 1000);
         assert_eq!(va_field_get(field, 4, 4, 4), 1000);
-        assert_eq!(va_field_get(field, 0, 0, 0), 0);
+        // Unset cells have minimum quantum of 1 (Third Law of thermodynamics)
+        assert_eq!(va_field_get(field, 0, 0, 0), 1);
 
         va_destroy_field(field);
     }

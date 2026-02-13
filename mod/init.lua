@@ -14,7 +14,7 @@ end
 local ffi = ie.require("ffi")
 
 -- Declare C function signatures
-ffi.cdef[[
+ffi.cdef [[
     // Phase 1
     int32_t va_add(int32_t a, int32_t b);
 
@@ -74,7 +74,7 @@ local global_state = nil
 -- ============================================================================
 
 -- Viewport anchor: world position corresponding to automaton (0,0,0)
-local viewport_anchor = {x = 0, y = 0, z = 0}
+local viewport_anchor = { x = 0, y = 0, z = 0 }
 local grid_size = 16
 
 -- Coordinate conversion helpers
@@ -96,25 +96,25 @@ end
 
 local function is_in_automaton_bounds(auto_pos)
     return auto_pos.x >= 0 and auto_pos.x < grid_size
-       and auto_pos.y >= 0 and auto_pos.y < grid_size
-       and auto_pos.z >= 0 and auto_pos.z < grid_size
+        and auto_pos.y >= 0 and auto_pos.y < grid_size
+        and auto_pos.z >= 0 and auto_pos.z < grid_size
 end
 
 -- Animation state
 local animation_state = {
     running = false,
-    interval = 1.0,  -- seconds between steps
+    interval = 1.0,         -- seconds between steps
     timer = 0.0,
-    field_stepping = false,  -- Phase 8a: track if StepController is mid-step
+    field_stepping = false, -- Phase 8a: track if StepController is mid-step
 }
 
 -- Phase 4/5: Register node type for visualization with interaction callbacks
 minetest.register_node("voxel_automata:cell", {
     description = "Cellular Automata Cell",
-    tiles = {"voxel_automata_cell.png"},
+    tiles = { "voxel_automata_cell.png" },
     walkable = false,
     sunlight_propagates = true,
-    groups = {dig_immediate = 3, not_in_creative_inventory = 1},
+    groups = { dig_immediate = 3, not_in_creative_inventory = 1 },
 
     -- Phase 5: Sync cell removal back to automaton
     on_dig = function(pos, node, digger)
@@ -152,17 +152,17 @@ for i = 0, 255 do
 
     minetest.register_node(node_name, {
         description = string.format("Mass Field (level %d/255)", i),
-        tiles = {{
+        tiles = { {
             name = "voxel_automata_grayscale.png",
-            color = {r = brightness * 255, g = brightness * 255, b = brightness * 255},
-        }},
+            color = { r = brightness * 255, g = brightness * 255, b = brightness * 255 },
+        } },
         paramtype = "light",
         light_source = 0,
         sunlight_propagates = true,
         walkable = false,
         pointable = false,
         buildable_to = true,
-        groups = {not_in_creative_inventory = 1},
+        groups = { not_in_creative_inventory = 1 },
     })
 end
 
@@ -206,7 +206,7 @@ local function render_region(min_x, min_y, min_z, max_x, max_y, max_z)
             for x = min_x, max_x - 1 do
                 local cell_state = buffer[offset]
                 if cell_state == 1 then
-                    minetest.set_node({x = x, y = y, z = z}, {name = "voxel_automata:cell"})
+                    minetest.set_node({ x = x, y = y, z = z }, { name = "voxel_automata:cell" })
                     placed_count = placed_count + 1
                 end
                 offset = offset + 1
@@ -255,8 +255,8 @@ local function render_region_at_world(min_x, min_y, min_z, max_x, max_y, max_z, 
                 local cell_state = buffer[offset]
                 local node_name = cell_state == 1 and "voxel_automata:cell" or "air"
                 minetest.set_node(
-                    {x = world_x + (x - min_x), y = world_y + (y - min_y), z = world_z + (z - min_z)},
-                    {name = node_name}
+                    { x = world_x + (x - min_x), y = world_y + (y - min_y), z = world_z + (z - min_z) },
+                    { name = node_name }
                 )
                 if cell_state == 1 then
                     placed_count = placed_count + 1
@@ -266,7 +266,9 @@ local function render_region_at_world(min_x, min_y, min_z, max_x, max_y, max_z, 
         end
     end
 
-    minetest.log("action", "[voxel_automata] Placed " .. placed_count .. " nodes at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
+    minetest.log("action",
+        "[voxel_automata] Placed " ..
+        placed_count .. " nodes at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
 end
 
 -- VoxelManip variant for bulk operations (optimized alternative to render_region_at_world)
@@ -299,15 +301,15 @@ local function render_region_at_world_voxelmanip(min_x, min_y, min_z, max_x, max
     end
 
     -- Calculate world coordinates
-    local world_min = {x = world_x, y = world_y, z = world_z}
-    local world_max = {x = world_x + width - 1, y = world_y + height - 1, z = world_z + depth - 1}
+    local world_min = { x = world_x, y = world_y, z = world_z }
+    local world_max = { x = world_x + width - 1, y = world_y + height - 1, z = world_z + depth - 1 }
 
     -- Create VoxelManip for bulk writing
     local vm = VoxelManip()
     local emerged_min, emerged_max = vm:read_from_map(world_min, world_max)
 
     local data = vm:get_data()
-    local area = VoxelArea:new({MinEdge = emerged_min, MaxEdge = emerged_max})
+    local area = VoxelArea:new({ MinEdge = emerged_min, MaxEdge = emerged_max })
 
     -- Get content IDs
     local node_id = minetest.get_content_id("voxel_automata:cell")
@@ -340,7 +342,9 @@ local function render_region_at_world_voxelmanip(min_x, min_y, min_z, max_x, max
     vm:write_to_map()
     vm:update_map()
 
-    minetest.log("action", "[voxel_automata] VoxelManip: Placed " .. placed_count .. " nodes at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
+    minetest.log("action",
+        "[voxel_automata] VoxelManip: Placed " ..
+        placed_count .. " nodes at world (" .. world_x .. "," .. world_y .. "," .. world_z .. ")")
 end
 
 -- ============================================================================
@@ -373,11 +377,11 @@ end
 minetest.log("action", "[voxel_automata] Phase 3: Created 16x16x16 grid")
 
 -- Set some cells alive in a cross pattern
-va.va_set_cell(state, 8, 8, 8, 1)  -- Center
-va.va_set_cell(state, 7, 8, 8, 1)  -- Left
-va.va_set_cell(state, 9, 8, 8, 1)  -- Right
-va.va_set_cell(state, 8, 7, 8, 1)  -- Front
-va.va_set_cell(state, 8, 9, 8, 1)  -- Back
+va.va_set_cell(state, 8, 8, 8, 1) -- Center
+va.va_set_cell(state, 7, 8, 8, 1) -- Left
+va.va_set_cell(state, 9, 8, 8, 1) -- Right
+va.va_set_cell(state, 8, 7, 8, 1) -- Front
+va.va_set_cell(state, 8, 9, 8, 1) -- Back
 minetest.log("action", "[voxel_automata] Phase 3: Set 5 cells alive (cross pattern)")
 
 -- Count alive cells
@@ -439,7 +443,7 @@ minetest.log("action", "[voxel_automata] Phase 8a: Created StepController (16x16
 
 -- Set a point source for testing at corner (0,0,0) with max brightness
 -- u32 max value = 4,294,967,295 (maps to grayscale 255, white)
-va.va_sc_field_set(global_step_controller, 0, 0, 0, 4294967295)
+va.va_sc_field_set(global_step_controller, 0, 0, 0, 3999995905)
 local sc_initial_value = va.va_sc_field_get(global_step_controller, 0, 0, 0)
 minetest.log("action", "[voxel_automata] Phase 8a: Set point source to " .. sc_initial_value)
 
@@ -459,7 +463,7 @@ local function render_field_grayscale()
         z = viewport_anchor.z
     }
 
-    local field_size = 16  -- Match StepController dimensions
+    local field_size = 16 -- Match StepController dimensions
 
     -- Calculate world bounds
     local world_min = field_anchor
@@ -473,7 +477,7 @@ local function render_field_grayscale()
     local vm = VoxelManip()
     local emerged_min, emerged_max = vm:read_from_map(world_min, world_max)
     local data = vm:get_data()
-    local area = VoxelArea:new({MinEdge = emerged_min, MaxEdge = emerged_max})
+    local area = VoxelArea:new({ MinEdge = emerged_min, MaxEdge = emerged_max })
 
     -- Pre-cache grayscale node content IDs
     local grayscale_ids = {}
@@ -491,7 +495,7 @@ local function render_field_grayscale()
                 local value = va.va_sc_field_get(global_step_controller, x, y, z)
 
                 -- Map u32 to 0-255 grayscale
-                local grayscale = math.floor(value / 16777216)  -- Divide by 2^24
+                local grayscale = math.floor(value / 16777216) -- Divide by 2^24
                 if grayscale > 255 then grayscale = 255 end
 
                 local world_pos = {
@@ -534,7 +538,7 @@ minetest.register_globalstep(function(dtime)
 
     -- Phase 8a: Handle ongoing incremental step (non-blocking work)
     if animation_state.field_stepping then
-        local done = va.va_sc_tick(global_step_controller, 4000)  -- 4ms budget per tick
+        local done = va.va_sc_tick(global_step_controller, 4000) -- 4ms budget per tick
         if done == 1 then
             animation_state.field_stepping = false
             local gen = va.va_sc_field_get_generation(global_step_controller)
@@ -543,7 +547,7 @@ minetest.register_globalstep(function(dtime)
             -- Phase 8b: Render field after step completes
             render_field_grayscale()
         end
-        return  -- Continue processing this step, don't start new work
+        return -- Continue processing this step, don't start new work
     end
 
     -- Animation timer logic (only if not mid-step)
@@ -561,14 +565,15 @@ minetest.register_globalstep(function(dtime)
 
         -- Phase 8a: Begin new incremental field step (non-blocking)
         local result = va.va_sc_begin_step(global_step_controller)
-        if result == 0 then  -- 0 = success
+        if result == 0 then -- 0 = success
             animation_state.field_stepping = true
             -- Do first tick of work immediately (avoid one-frame delay)
             local done = va.va_sc_tick(global_step_controller, 4000)
             if done == 1 then
                 animation_state.field_stepping = false
                 local gen = va.va_sc_field_get_generation(global_step_controller)
-                minetest.log("action", "[voxel_automata] Incremental step completed immediately: generation " .. tonumber(gen))
+                minetest.log("action",
+                    "[voxel_automata] Incremental step completed immediately: generation " .. tonumber(gen))
 
                 -- Phase 8b: Render field after step completes
                 render_field_grayscale()
@@ -614,10 +619,13 @@ minetest.register_chatcommand("va_info", {
         end
 
         minetest.chat_send_player(name, "[voxel_automata] Generation: " .. tonumber(generation))
-        minetest.chat_send_player(name, "[voxel_automata] Alive cells: " .. alive_count .. " / " .. (grid_size * grid_size * grid_size))
-        minetest.chat_send_player(name, "[voxel_automata] Grid size: " .. grid_size .. "x" .. grid_size .. "x" .. grid_size)
+        minetest.chat_send_player(name,
+            "[voxel_automata] Alive cells: " .. alive_count .. " / " .. (grid_size * grid_size * grid_size))
+        minetest.chat_send_player(name,
+            "[voxel_automata] Grid size: " .. grid_size .. "x" .. grid_size .. "x" .. grid_size)
         minetest.chat_send_player(name, "[voxel_automata] Viewport anchor: " .. minetest.pos_to_string(viewport_anchor))
-        minetest.chat_send_player(name, "[voxel_automata] Animation: " .. (animation_state.running and "running" or "stopped"))
+        minetest.chat_send_player(name,
+            "[voxel_automata] Animation: " .. (animation_state.running and "running" or "stopped"))
 
         return true, "Info displayed"
     end
@@ -647,7 +655,8 @@ minetest.register_chatcommand("va_step", {
 
 -- /va show: Render automaton at world position (VoxelManip only)
 minetest.register_chatcommand("va_show", {
-    description = "Render automaton grid at world position using VoxelManip. Usage: /va_show [world_x] [world_y] [world_z]",
+    description =
+    "Render automaton grid at world position using VoxelManip. Usage: /va_show [world_x] [world_y] [world_z]",
     func = function(name, param)
         if not global_state then
             return false, "No automaton state available"
@@ -682,7 +691,8 @@ minetest.register_chatcommand("va_show", {
         render_region_at_world_voxelmanip(0, 0, 0, grid_size, grid_size, grid_size, world_x, world_y, world_z)
         local elapsed = (minetest.get_us_time() - start_time) / 1000
 
-        minetest.chat_send_player(name, string.format("[voxel_automata] Rendered in %.2f ms at %s", elapsed, minetest.pos_to_string(viewport_anchor)))
+        minetest.chat_send_player(name,
+            string.format("[voxel_automata] Rendered in %.2f ms at %s", elapsed, minetest.pos_to_string(viewport_anchor)))
         return true, "Automaton rendered"
     end
 })
@@ -704,7 +714,8 @@ minetest.register_chatcommand("va_animate", {
         animation_state.interval = interval_ms / 1000.0
         animation_state.timer = 0
 
-        minetest.chat_send_player(name, string.format("[voxel_automata] Animation started (interval: %d ms)", interval_ms))
+        minetest.chat_send_player(name,
+            string.format("[voxel_automata] Animation started (interval: %d ms)", interval_ms))
         return true, "Animation started"
     end
 })
@@ -746,7 +757,7 @@ minetest.register_chatcommand("va_pull", {
 
         local emerged_min, emerged_max = vm:read_from_map(world_min, world_max)
         local data = vm:get_data()
-        local area = VoxelArea:new({MinEdge = emerged_min, MaxEdge = emerged_max})
+        local area = VoxelArea:new({ MinEdge = emerged_min, MaxEdge = emerged_max })
         local cell_id = minetest.get_content_id("voxel_automata:cell")
 
         -- Fill buffer from world (z,y,x order)
@@ -783,7 +794,8 @@ minetest.register_chatcommand("va_pull", {
             return false, "Failed to import region"
         end
 
-        minetest.chat_send_player(name, string.format("[voxel_automata] Pulled %d alive cells from world into automaton", synced_alive))
+        minetest.chat_send_player(name,
+            string.format("[voxel_automata] Pulled %d alive cells from world into automaton", synced_alive))
         return true, "World → automaton pull complete"
     end
 })
@@ -838,7 +850,8 @@ minetest.register_chatcommand("va_field_info", {
 
         minetest.chat_send_player(name, "[voxel_automata] Generation: " .. tonumber(generation))
         minetest.chat_send_player(name, "[voxel_automata] Currently stepping: " .. (is_stepping == 1 and "yes" or "no"))
-        minetest.chat_send_player(name, "[voxel_automata] Lua field_stepping flag: " .. tostring(animation_state.field_stepping))
+        minetest.chat_send_player(name,
+            "[voxel_automata] Lua field_stepping flag: " .. tostring(animation_state.field_stepping))
         minetest.chat_send_player(name, string.format("[voxel_automata] Total mass: %d", total_mass))
         minetest.chat_send_player(name, string.format("[voxel_automata] Corner cell (0,0,0): value=%d, grayscale=%d",
             corner_value, corner_grayscale))
