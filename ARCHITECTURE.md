@@ -174,32 +174,77 @@ These phases are complete with passing tests. They established the FFI bridge, g
 
 These phases build toward the full FEA simulation. Each phase generalizes the proven delta-grid diffusion into the persistent-delta, variable-tick-rate architecture.
 
-#### Phase 8: Persistent Deltas
-- **Proves**: Deltas survive across ticks and correctly accumulate/drain at mismatched rates
-- **Rust**: Refactor `field_step_fused` to produce persistent `Delta` structures instead of transient flow calculations. Delta connects two `ElementId` values, accumulates at source tick rate, resolves at drain tick rate.
-- **Test (Rust)**: Two regions at different tick rates — fast side accumulates deltas, slow side drains on its tick. Total mass conserved across rate boundary. Single-rate case produces identical results to Phase 7 fused algorithm.
+#### Phase 8: Validate & Refactor Incremental Stepping for In-World Testing
+- **Goal**: Establish that `StepController` (non-blocking incremental stepping) is production-ready by validating in Luanti and refactoring delta infrastructure for modularity
+- **Current state**: `StepController` exists (Morton-ordered 16³ tiles, `tick(budget_us)` API, snapshot double-buffer) but untested in actual gameplay. Vacuum decay bug was fixed (commit 00dafbf) at the game level; Rust implementation is sound. Delta computation is transient (computed and discarded per-step).
+- **Performance philosophy**: Performance > determinism. Small divergences (±25 per cell on 128³) between tile boundaries are acceptable. Parallelism (multiple tiles, future network async) is more valuable than bit-perfect reproducibility.
 
-#### Phase 8: Non-Blocking Incremental Stepping
-- **Proves**: Stepping work can be divided into time-budgeted tiles that process across multiple Luanti ticks without blocking frames
-- **Rust**: Implement `StepController` with snapshot double-buffer architecture. Tiles (16³) process in Morton-order from immutable snapshot, accumulating flows into target buffer. `tick(budget_us)` does bounded work, returns true when step complete.
-- **Key invariant**: Incremental stepper is bit-identical to `field_step_fused` — all reads from same generation-N snapshot, all writes to generation-N+1 buffer, commutative accumulation across tiles.
-- **Test (Rust)**: Bit-identity test against fused baseline on 128³ for 4 generations. Incremental-across-ticks with small budget produces same result as blocking. Conservation, determinism, rotational symmetry all pass.
-- **Implementation plan**: See `/home/kirrim/.claude/plans/tidy-dazzling-lagoon.md`
+**Track A: In-World Performance Validation**
+- **Lua test harness**: Create `/ca_perf size_x size_y size_z [tickrate_ms=1000]` command that measures real frame times during field stepping at commanded grid sizes
+  - Display: FPS during step, time-budget utilization per tick, visual confirmation of no frame stalls
+  - Ask player: "Does the world feel smooth? Any hitches during stepping?" → feedback loop
+  - uses existing voxelmanip to render the entire field to nodes; it's important to also track lag during voxel operations
+- **Success criteria**: 512³ stepping completes in < 75 ms per generation without frame drops below 20 FPS in 60-tick observation window
+- **Blockage handling**: If performance regresses, profile with `cargo flamegraph` to find bottleneck (cache misses? tile sync overhead? Lua FFI overhead?)
 
-#### Phase 9: Hilbert Curve Indexing
+**Track B: Delta Infrastructure Refactoring**
+- **Goal**: Move toward persistent deltas (Phase 9+) by making delta contracts modular and readable
+- **Current problem**: `field_step_fused` computes transient flows on-the-fly. The only way to observe them is the "bullshit-o-meter" debug test, which bypasses normal algorithm kernels.
+- **Refactor**: Extract flow computation into composable `DeltaContract` abstractions that can be inserted into the stepping pipeline. Canonical form:
+  ```rust
+  trait DeltaCompute {
+      fn step(&mut self, source_idx: usize, dest_idx: usize, source_val: u32, dest_val: u32) -> i64;
+  }
+  
+  struct FlowDelta { /* standard fused diffusion */ }
+  struct LoggingDelta { /* wraps FlowDelta, prints flows to log */ }
+  struct PersistentDelta { /* accumulates across generations */ }
+  ```
+- **Benefit**: Can replace any single delta contract in the field with `LoggingDelta` to inspect real-time flows during stepping, supporting future network/clusterio design
+- **Test (Rust)**: Wrap 2-3 random pairs in 128³ field with LoggingDelta, step, verify logged flows match reference fused algorithm's computed flows
+- **No new FFI yet** — Rust-side only. Lua integration (Phase 9+) comes after architecture proves modular.
+
+**Why both tracks matter**:
+- Performance validation ensures stepping is usable in-world (track A is blocking for Phase 9)
+- Delta modularity is the foundation for heterogeneous elements (machines, network clusterio, different tick rates) — can't build Phase 10+ without it (track B is blocking for Phase 10)
+
+#### Phase 9: Persistent Deltas & Variable Tick Rates (Adjacent Regions)
+- **Proves**: Two adjacent regions can tick at different rates while conserving mass across the boundary via persistent delta contracts
+- **Goal**: Closest design target for FEA. Not full Hilbert reindexing yet (Phase 9.5), just two regions in a field with different tick rates.
+- **Rust design**:
+  - Refactor `field_step_fused` to emit persistent `Delta` structures instead of transient flows
+  - `Delta` enum: `StandardFlow { source_idx, dest_idx, quantity }` (single-generation contract)
+  - Fast region (e.g., 60 Hz): Computes deltas at every tick, accumulates flows
+  - Slow region (e.g., 1 Hz): Only steps every N ticks, but drains accumulated deltas
+  - **Network-ready design**: Delta can be `RemoteFlow { local_idx, remote_host, remote_idx }` for clusterio (data-in-transit, picked up next tick without knowing remote state)
+- **Test (Rust)**: Two 64³ regions, boundary plane between them. Mark one as fast (step every tick), one as slow (step every 60th tick). Inject mass at center of fast region, observe gradient diffusing through boundary, verify total mass conserved
+- **Test (Lua)**: In-world performance: spawn two adjacent 64³ fields at different tick rates, visually confirm no pop-in or jerky transitions at boundary
+
+#### Phase 9.5: Hilbert Curve Indexing (Optional, Prior to Phase 10)
 - **Proves**: Hilbert-indexed field produces identical physics results with better cache performance
 - **Rust**: Implement 3D Hilbert curve mapping. New `HilbertField` with same `field_set/get/step` interface but Hilbert-ordered memory layout. Neighbor lookup via Hilbert index arithmetic.
-- **Test (Rust)**: Hilbert field produces identical diffusion results to row-major field on same input. Benchmark shows reduced cache misses on large grids (256^3+).
+- **Benefit**: Spatial locality for cache, enables nucleus-driven scheduling in Phase 10 (nearby voxels already hot)
+- **Test (Rust)**: Hilbert field produces equivalent (not necessarily bit-identical, tolerance ±25) diffusion to row-major field on same input. Benchmark shows reduced cache misses on large grids (256^3+).
 
-#### Phase 10: Nucleation Sites + Variable Tick Rates
-- **Proves**: Regions tick at different rates while maintaining conservation across rate boundaries
-- **Rust**: Tick-rate metadata per Hilbert curve segment. Nucleation site registration API. Tick scheduler that advances fast regions more often than slow ones. Persistent deltas bridge rate boundaries.
-- **Test (Rust)**: Place nucleation site at center — surrounding region ticks at 60 Hz, distant region at 1 Hz. Mass conserved. Remove nucleation site — region relaxes to low tick rate. Machine nucleation site persists without player.
+#### Phase 10: Nucleation Sites + Adaptive Tick Scheduling
+- **Proves**: Simulation rate emerges from local physics activity (machines, reactions, player) rather than fixed chunks
+- **Rust design**:
+  - Nucleation site registry: machine center, chemical reaction, player position
+  - Tick scheduler: Advance fast regions (60 Hz) more often than slow regions (1-10 Hz)
+  - Persistent deltas accumulate at fast tick rate, resolve at slow tick rate
+  - No hard chunk boundaries — tick rate gradient emerges smoothly
+- **Test (Rust)**: Place nucleation site at grid center — measure tick rates at various distances (0 tiles away = 60 Hz, 10 tiles away = 30 Hz, 50 tiles away = 1 Hz). Remove nucleation site — region relaxes to idle tick rate. Machine nucleation site persists when player walks away.
+- **Test (Lua)**: In-world: Spawn active machine → surrounding area becomes responsive. Leave area → ticks slow down. Return → speeds up. Measure frame times to ensure no correlation with background simulation complexity.
 
-#### Phase 11: Heterogeneous Mesh Elements
-- **Proves**: Machines with internal subnodes can exchange conserved quantities with voxel grid
-- **Rust**: `ElementId` enum supporting both voxel coordinates and machine subnode IDs. One-to-many delta fan-out from machine internal state to surrounding voxels. Machine subnodes participate in same conservation framework.
-- **Test (Rust)**: Machine subnode injects heat into surrounding voxels via deltas. Total energy conserved. Machine at fast/slow boundary — deltas accumulate correctly.
+#### Phase 11: Heterogeneous Mesh Elements (Machines, Clusterio)
+- **Proves**: Arbitrary "elements" (machines, network nodes, NPCs) can exchange conserved quantities via the same persistent delta framework that handles voxel-to-voxel flows
+- **Rust design**:
+  - `ElementId` enum: `Voxel(idx)`, `MachineSubnode(machine_id, port_id)`, `RemoteElement(remote_host, remote_id)` (clusterio)
+  - One-to-many: Machine subnode(s) exchange with surrounding voxels via persistent deltas
+  - Network-ready: `RemoteElement` delta persists in local queue, syncs to remote on next connection, no coupling to remote state
+- **Real-world use case**: Clusterio with two factory servers sharing a border: Factory A's machine injects matter into border voxels, deltas accumulate, Factory B's stepping drains the deltas
+- **Test (Rust)**: Machine subnode at fast tick rate (machine tick) injects heat into surrounding voxels at slow tick rate (field tick). Deltas accumulate, conserved mass confirmed.
+- **Test (Lua)**: In-world: Machine placed at edge of viewport, verify it continues operating smoothly when player moves away (machine's own tick rate independent of viewport)
 
 #### Phase 12: Lua Mid-Step Writes
 - **Proves**: External agents (plants, NPCs, players) can modify simulation state between ticks
@@ -366,6 +411,32 @@ Water field:
 ### Mod Compatibility
 
 Third-party mods see standard Luanti nodes, interact normally. Lua wrapper ensures node changes propagate to Rust field.
+
+## Design Philosophy: Performance Over Determinism
+
+### Why Small Divergences Are Acceptable
+
+The voxel automata simulation is designed for **ecological realism and player experience**, not multiplayer sync or bit-perfect determinism (unlike Factorio). Key principles:
+
+1. **Performance > Determinism**: Non-blocking tiling (Phase 8) with tile-boundary remainder accumulation may produce ±25 per-cell divergences from sequential stepping. This is **acceptable** because:
+   - Players never see tile boundaries (no LOD pop-in)
+   - Stochastic rounding creates realistic small-scale fluctuations (±1-2 per generation)
+   - Parallelism enables 5× speedup: worth the cosmetic variance
+
+2. **Async Network-Ready**: Future clusterio extension uses asynchronous delta contracts where two servers exchange mass/heat without strong coupling:
+   - Server A injects, Server B drains — no guarantee of perfect tick synchronization
+   - Delta persists in transit queue, resolved on next connection window
+   - Players expect environmental variation (weather, chaos) anyway — perfect determinism would feel artificial
+
+3. **Master/Client Desync Philosophy**: If Luanti multiplay is added later:
+   - Master server is authoritative (runs full simulation)
+   - Clients get quantized view updates (same as single-player viewport)
+   - Clients never try to "fix" physics divergence — just render what master sends
+   - This mirrors weather systems in multiplayer games (server's weather is ground truth)
+
+### Consequence: In-World Testing Required
+
+Because small code changes can affect performance significantly (cache misses, tile sync overhead), **every Phase 8+ change must be validated in Luanti with `/ca_perf` or similar instrumentation**. Rust benchmarks alone are insufficient; real gameplay frame times matter more.
 
 ## Success Criteria
 
