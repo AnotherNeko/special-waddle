@@ -10,6 +10,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::automaton::delta::DeltaOverrides;
 use crate::automaton::field::{create_field, Field};
 
 pub const TILE_SIZE: i16 = 16;
@@ -49,6 +50,14 @@ pub struct IncrementalStep {
 
     /// Diffusion rate (cached).
     pub diffusion_rate: u8,
+
+    /// Sparse per-pair contract overrides. Key: (owner_idx, neighbor_idx).
+    /// Empty for fully-modal fields.
+    pub delta_overrides: DeltaOverrides,
+
+    /// Per-cell flag: true if this cell owns at least one override pair.
+    /// Checked before the hash lookup to keep the modal fast path branchless.
+    pub cell_has_override: Vec<bool>,
 }
 
 /// Manages the lifecycle of incremental steps for a Field.
@@ -61,6 +70,10 @@ pub struct StepController {
 
     /// Rayon thread pool (1 thread initially, configurable).
     pub thread_pool: rayon::ThreadPool,
+
+    /// Persistent delta overrides. Moved into IncrementalStep on begin_step,
+    /// returned here on finalize_step (with updated log entries, etc.).
+    pub delta_overrides: DeltaOverrides,
 }
 
 /// Interleave bits of x, y, z to produce a Morton code.
@@ -172,69 +185,78 @@ fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
     for z in z_start..z_end {
         for y in y_start..y_end {
             for x in x_start..x_end {
+                let idx_a = field_index(step, x, y, z);
+                let check_override = step.cell_has_override[idx_a];
+
                 // X-axis pair: (x, y, z) with (x+1, y, z) or mirror at boundary
                 if x + 1 < step.width {
-                    // Interior pair
-                    let idx_a = field_index(step, x, y, z);
                     let idx_b = field_index(step, x + 1, y, z);
-
                     let gradient = step.source[idx_a] as i64 - step.source[idx_b] as i64;
-                    let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-
+                    let flow = {
+                        if check_override {
+                            if let Some(kind) = step.delta_overrides.get_mut(&(idx_a, idx_b)) {
+                                kind.apply(gradient, conductivity, divisor, &mut remainder_acc, compute_flow)
+                            } else {
+                                compute_flow(gradient, conductivity, divisor, &mut remainder_acc)
+                            }
+                        } else {
+                            compute_flow(gradient, conductivity, divisor, &mut remainder_acc)
+                        }
+                    };
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                     step.target[idx_b] = ((step.target[idx_b] as i64) + flow) as u32;
                 } else {
                     // Boundary mirror: x+1 doesn't exist, apply mirror delta
-                    let idx_a = field_index(step, x, y, z);
-
-                    let gradient = step.source[idx_a] as i64 - step.source[idx_a] as i64; // gradient to "ghost" cell at boundary (always 0)
+                    let gradient = 0i64; // gradient to ghost cell at boundary is always 0
                     let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-
-                    // Apply mirror: flow out to boundary, so apply negative flow back to cell
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                 }
 
                 // Y-axis pair: (x, y, z) with (x, y+1, z) or mirror at boundary
                 if y + 1 < step.height {
-                    // Interior pair
-                    let idx_a = field_index(step, x, y, z);
                     let idx_b = field_index(step, x, y + 1, z);
-
                     let gradient = step.source[idx_a] as i64 - step.source[idx_b] as i64;
-                    let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-
+                    let flow = {
+                        if check_override {
+                            if let Some(kind) = step.delta_overrides.get_mut(&(idx_a, idx_b)) {
+                                kind.apply(gradient, conductivity, divisor, &mut remainder_acc, compute_flow)
+                            } else {
+                                compute_flow(gradient, conductivity, divisor, &mut remainder_acc)
+                            }
+                        } else {
+                            compute_flow(gradient, conductivity, divisor, &mut remainder_acc)
+                        }
+                    };
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                     step.target[idx_b] = ((step.target[idx_b] as i64) + flow) as u32;
                 } else {
                     // Boundary mirror: y+1 doesn't exist, apply mirror delta
-                    let idx_a = field_index(step, x, y, z);
-
-                    let gradient = step.source[idx_a] as i64 - step.source[idx_a] as i64; // gradient to "ghost" cell at boundary (always 0)
+                    let gradient = 0i64;
                     let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-
-                    // Apply mirror: flow out to boundary, so apply negative flow back to cell
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                 }
 
                 // Z-axis pair: (x, y, z) with (x, y, z+1) or mirror at boundary
                 if z + 1 < step.depth {
-                    // Interior pair
-                    let idx_a = field_index(step, x, y, z);
                     let idx_b = field_index(step, x, y, z + 1);
-
                     let gradient = step.source[idx_a] as i64 - step.source[idx_b] as i64;
-                    let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-
+                    let flow = {
+                        if check_override {
+                            if let Some(kind) = step.delta_overrides.get_mut(&(idx_a, idx_b)) {
+                                kind.apply(gradient, conductivity, divisor, &mut remainder_acc, compute_flow)
+                            } else {
+                                compute_flow(gradient, conductivity, divisor, &mut remainder_acc)
+                            }
+                        } else {
+                            compute_flow(gradient, conductivity, divisor, &mut remainder_acc)
+                        }
+                    };
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                     step.target[idx_b] = ((step.target[idx_b] as i64) + flow) as u32;
                 } else {
                     // Boundary mirror: z+1 doesn't exist, apply mirror delta
-                    let idx_a = field_index(step, x, y, z);
-
-                    let gradient = step.source[idx_a] as i64 - step.source[idx_a] as i64; // gradient to "ghost" cell at boundary (always 0)
+                    let gradient = 0i64;
                     let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-
-                    // Apply mirror: flow out to boundary, so apply negative flow back to cell
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                 }
             }
@@ -265,6 +287,7 @@ impl StepController {
             field,
             active_step: None,
             thread_pool,
+            delta_overrides: DeltaOverrides::default(),
         }
     }
 
@@ -289,6 +312,7 @@ impl StepController {
             field,
             active_step: None,
             thread_pool,
+            delta_overrides: DeltaOverrides::default(),
         }
     }
 
@@ -321,6 +345,15 @@ impl StepController {
         let target = self.field.cells.clone();
         let tile_queue = build_tile_queue(tiles_x as u8, tiles_y as u8, tiles_z as u8);
 
+        let cell_count = width as usize * height as usize * depth as usize;
+        let mut cell_has_override = vec![false; cell_count];
+        let delta_overrides = std::mem::take(&mut self.delta_overrides);
+        for &(owner_idx, _) in delta_overrides.keys() {
+            if owner_idx < cell_count {
+                cell_has_override[owner_idx] = true;
+            }
+        }
+
         let step = IncrementalStep {
             source,
             target,
@@ -332,6 +365,8 @@ impl StepController {
             height,
             depth,
             diffusion_rate: self.field.diffusion_rate,
+            delta_overrides,
+            cell_has_override,
         };
 
         self.active_step = Some(step);
@@ -376,6 +411,7 @@ impl StepController {
         if let Some(step) = self.active_step.take() {
             self.field.cells = step.target;
             self.field.generation = step.target_generation;
+            self.delta_overrides = step.delta_overrides;
         }
     }
 }
@@ -901,5 +937,57 @@ mod tests {
             "Performance regression: took {:.2}s",
             elapsed.as_secs_f64()
         );
+    }
+
+    /// Phase 8B: Logged pairs record flows identical to the modal formula.
+    /// Registers two interior pairs with DeltaKind::Logged, steps the field,
+    /// verifies each logged flow matches compute_flow called with the same inputs.
+    #[test]
+    fn test_logged_delta_matches_modal() {
+        use crate::automaton::delta::DeltaKind;
+
+        // Small field: 4×4×4, single tile.
+        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+
+        // Set up a gradient between cell (0,0,0)→(1,0,0) and (0,1,0)→(0,2,0).
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+        let idx = |x: i16, y: i16, z: i16| {
+            z as usize * h as usize * w as usize + y as usize * w as usize + x as usize
+        };
+
+        ctrl.field.cells[idx(0, 0, 0)] = 10000;
+        ctrl.field.cells[idx(1, 0, 0)] = 2000;
+        ctrl.field.cells[idx(0, 1, 0)] = 8000;
+        ctrl.field.cells[idx(0, 2, 0)] = 1000;
+
+        let pair_x = (idx(0, 0, 0), idx(1, 0, 0));
+        let pair_y = (idx(0, 1, 0), idx(0, 2, 0));
+
+        ctrl.delta_overrides.insert(pair_x, DeltaKind::new_logged());
+        ctrl.delta_overrides.insert(pair_y, DeltaKind::new_logged());
+
+        ctrl.step_blocking();
+
+        let shift = 0u32;
+        let conductivity = 65535i64;
+        let divisor = (7i64 << shift) << 16;
+
+        let check_logged = |kind: &DeltaKind, expected_gradient: i64| {
+            let log = kind.log().expect("should be Logged variant");
+            assert!(!log.is_empty(), "log should have at least one entry");
+            let mut acc = 0i64;
+            let expected_flow = compute_flow(expected_gradient, conductivity, divisor, &mut acc);
+            // Allow ±1: the tile's shared remainder_acc carries state from prior pairs,
+            // so the logged flow may differ by 1 from a fresh-accumulator call.
+            assert!(
+                (log[0] - expected_flow).abs() <= 1,
+                "logged flow {} is more than ±1 from modal flow {} for gradient {}",
+                log[0], expected_flow, expected_gradient
+            );
+        };
+
+        check_logged(ctrl.delta_overrides.get(&pair_x).unwrap(), 10000 - 2000);
+        check_logged(ctrl.delta_overrides.get(&pair_y).unwrap(), 8000 - 1000);
     }
 }

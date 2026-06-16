@@ -4,6 +4,7 @@
 //! stepping the automaton, and extracting/importing regions.
 //! The FFI layer in `ffi/` calls these functions.
 
+pub mod delta;
 pub mod field;
 pub mod grid;
 pub mod incremental;
