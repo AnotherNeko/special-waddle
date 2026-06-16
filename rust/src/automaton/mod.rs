@@ -8,6 +8,7 @@ pub mod delta;
 pub mod field;
 pub mod grid;
 pub mod incremental;
+pub mod kernel;
 pub mod region;
 pub mod stepping;
 
