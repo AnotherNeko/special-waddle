@@ -167,3 +167,15 @@ Disadvantages:
 The core tension: 8B's stated test is narrow (log some flows, verify against baseline), but the *purpose* of 8B is to build the foundation for Phases 9-11. Approach B passes the test but doesn't serve the purpose. Approaches A/C/D serve the purpose but are bigger.
 
 What's your read on where the cut should be?
+
+---
+
+## Decision: Approach D
+
+**Chosen: Hybrid enum (`DeltaKind`) + fast path.**
+
+B was ruled out by the phase-change requirements for goal #1: boiling bubbles require buoyancy-driven advection, which has a fundamentally different computation shape than gradient diffusion — you can't model it by swapping in a different formula. B also can't coordinate two simultaneous contracts (heat + mass) on the same cell pair, which multi-field physics needs. D handles this by adding a `Buoyant` enum variant alongside `Modal` and `Logged`, with the `DeltaOverrides` map holding separate contracts per conserved quantity on the same pair.
+
+D was preferred over A and C because the modal fast path (no override in the map → inline `compute_flow` verbatim, no lookup) keeps the 99.99% case at zero overhead, while A's vtable dispatch and C's per-pair `HashMap` lookup both add real cost at 6M pairs/step.
+
+Note: the delta contract abstraction (Phase C in `process_tile`) is only half of what phase changes need. The Phase B hook (intra-cell state transition: substance identity, phase boundary threshold, latent heat accounting) needs its own design — a per-voxel `(substance_id, mass, thermal_energy)` struct and a material properties table. That's a separate design task before boiling can be demonstrated.
