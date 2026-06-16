@@ -3,21 +3,45 @@
 //! `DeltaKind` is the Phase 8B hybrid enum. The modal fast path — used for
 //! 99.99% of pairs — bypasses this enum entirely. Only pairs registered in
 //! `DeltaOverrides` reach here.
+//!
+//! # Contract taxonomy (with ONI analogues)
+//!
+//! - `Modal`  — normal diffusion. The common case; registered overrides may be
+//!   Modal to allow future wrapping without touching the hot path.
+//!
+//! - `Mirror` — perfectly insulating boundary. No substance crosses the pair
+//!   regardless of gradient. ONI analogue: **neutronium**, the unobtainable
+//!   map-edge tile that hard-walls all heat and mass transfer.
+//!
+//! - `Void`   — mass sink. Substance flows out of the owner and disappears;
+//!   the neighbor index is a phantom that never receives anything. Conservation
+//!   is intentionally violated. ONI analogue: **space** — a tile open to vacuum
+//!   beyond the asteroid boundary. Gas/liquid that reaches a space-adjacent cell
+//!   exits the simulation permanently.
+//!
+//! - `Remote` (future) — cross-server portal. Like `Void`, the neighbor index
+//!   is not a local cell — it lives on a different game server in a Clusterio
+//!   cluster. The flow is serialized and forwarded over the network; the remote
+//!   server applies the matching inbound delta to its local cell. From each
+//!   server's perspective the pair looks like a Void until the network ACK arrives.
 
-// Per-pair flow contract. `Modal` is the degenerate case (same as inline
-// compute_flow). Future variants (Persistent, Remote) extend without changing
-// the hot path.
+/// Per-pair flow contract. `Modal` is the degenerate case (same as inline
+/// `compute_flow`). Non-modal variants are sparse and looked up only when
+/// `cell_has_override` flags the owner cell, keeping the hot path branchless.
 pub enum DeltaKind {
-    // Gradient diffusion, same formula as the inline fast path. Registered
-    // overrides may be Modal to allow future wrapping without hot-path cost.
+    /// Gradient diffusion identical to the inline fast path.
     Modal,
-    // Same computation as Modal, but records each flow value for diagnostics.
+    /// Same as Modal but records each flow value for diagnostics.
     Logged { log: Vec<i64> },
-    // A force mirror, kinda prevents flows.
+    /// Perfectly insulating boundary — zero flow regardless of gradient.
+    /// Use for map-edge tiles that must never exchange substance (neutronium).
     Mirror,
-    // Void violates conservation of mass intentionally.
+    /// Mass sink — owner loses substance, neighbor receives nothing.
+    /// Use for cells adjacent to out-of-bounds vacuum (open space, hull breach).
     Void,
-    // future types: Persistent, Remote
+    // Remote: portal to a field on another game server (Clusterio). Like Void,
+    // the neighbor index is non-local; the flow is forwarded over the network.
+    // Needs async accumulation design before implementation.
 }
 
 impl DeltaKind {
@@ -38,10 +62,10 @@ impl DeltaKind {
                 log.push(flow);
                 flow
             }
-            // Mirror blocks flow: conductivity=0 means gradient*0/divisor = 0.
+            // Zero flow: neutronium-style hard insulation.
             DeltaKind::Mirror => 0,
-            // Void swallows mass: apply flow to owner but not neighbor.
-            // Conservation is intentionally violated (mass sink).
+            // Full flow from owner, but process_tile must not write the neighbor.
+            // Returning `flow` here is correct once the caller is fixed.
             DeltaKind::Void => flow,
         }
     }
@@ -58,7 +82,7 @@ impl DeltaKind {
     }
 }
 
-// Sparse map from cell-pair `(owner_idx, neighbor_idx)` to a contract.
-// The owner index is always the cell that owns the pair in the
-// owner-writes-positive scheme (i.e., the lower-xyz cell of the two).
+/// Sparse map from cell-pair `(owner_idx, neighbor_idx)` to a contract.
+/// The owner index is always the lower-xyz cell of the pair (owner-writes-positive scheme).
+/// The neighbor index for `Void` and `Remote` pairs may be out of bounds or fictional.
 pub type DeltaOverrides = std::collections::HashMap<(usize, usize), DeltaKind>;

@@ -462,12 +462,18 @@ mod tests {
             assert!(
                 delta.abs() <= 1,
                 "Step {}: boundary cell {} changed by {} (before={}, after={}), expected ±1 or 0",
-                step, cell, delta, before, after
+                step,
+                cell,
+                delta,
+                before,
+                after
             );
             assert_ne!(
-                *after, u32::MAX,
+                *after,
+                u32::MAX,
                 "Step {}: boundary cell {} underflowed to u32::MAX",
-                step, cell
+                step,
+                cell
             );
         }
 
@@ -682,11 +688,396 @@ mod tests {
             assert!(
                 (log[0] - expected_flow).abs() <= 1,
                 "logged flow {} is more than ±1 from modal flow {} for gradient {}",
-                log[0], expected_flow, expected_gradient
+                log[0],
+                expected_flow,
+                expected_gradient
             );
         };
 
         check_logged(ctrl.delta_overrides.get(&pair_x).unwrap(), 10000 - 2000);
         check_logged(ctrl.delta_overrides.get(&pair_y).unwrap(), 8000 - 1000);
+    }
+
+    // Helper: flat index for a field of given dimensions.
+    fn idx(w: i16, h: i16, x: i16, y: i16, z: i16) -> usize {
+        z as usize * h as usize * w as usize + y as usize * w as usize + x as usize
+    }
+
+    /// Phase 8B: Mirror override blocks flow on a pair with a strong gradient.
+    /// Mass conservation must still hold (neither cell changes due to that pair).
+    #[test]
+    fn test_mirror_delta_blocks_flow() {
+        use crate::automaton::delta::DeltaKind;
+
+        // 4×4×4, diffusion_rate=0 for predictable divisor.
+        // reminder that diffusion rate is inversely proportional to actual flow rate.
+        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+
+        // Strong gradient along X between (0,0,0) and (1,0,0).
+        let i_a = idx(w, h, 0, 0, 0);
+        let i_b = idx(w, h, 1, 0, 0);
+        ctrl.field.cells[i_a] = 1_000_000;
+        ctrl.field.cells[i_b] = 0;
+        let before_a = ctrl.field.cells[i_a];
+        let before_b = ctrl.field.cells[i_b];
+
+        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
+        ctrl.step_blocking();
+
+        let after_a = ctrl.field.cells[i_a];
+        let after_b = ctrl.field.cells[i_b];
+
+        // The mirror pair must produce zero net exchange between a and b.
+        // Other pairs (Y, Z neighbors) may still draw from a, so we only check
+        // that b did not receive from this specific pair. Since b starts at 0
+        // and has no other neighbors with mass in this direction, after_b == 1
+        // (the field minimum) indicates normal minimum enforcement, not mirror flow.
+        // The mirror contract means: flow on (i_a, i_b) == 0.
+        // We verify this indirectly: b must not have risen above its minimum.
+        assert_eq!(
+            after_b, 1,
+            "Mirror pair: neighbor should not receive flow (got {})",
+            after_b
+        );
+
+        // a may lose mass to its other neighbors but must not gain from b.
+        assert!(
+            after_a <= before_a,
+            "Mirror pair: owner should not gain mass (before={}, after={})",
+            before_a,
+            after_a
+        );
+        let _ = before_b; // suppress unused warning
+    }
+
+    /// Phase 8B: Mirror override — mass conservation holds across the whole field.
+    #[test]
+    fn test_mirror_delta_conserves_mass() {
+        use crate::automaton::delta::DeltaKind;
+
+        let mut ctrl = StepController::new(8, 8, 8, 1, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+
+        // Scatter some mass.
+        ctrl.field.cells[idx(w, h, 2, 2, 2)] = 500_000;
+        ctrl.field.cells[idx(w, h, 3, 2, 2)] = 100_000;
+        ctrl.field.cells[idx(w, h, 4, 2, 2)] = 200_000;
+
+        let i_a = idx(w, h, 2, 2, 2);
+        let i_b = idx(w, h, 3, 2, 2);
+        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
+
+        let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+        // for loop does several steps
+        for _ in 0..16 {
+            ctrl.step_blocking();
+        }
+        let mass_after: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+
+        assert_eq!(
+            mass_before, mass_after,
+            "Mirror pair must not break conservation (before={}, after={})",
+            mass_before, mass_after
+        );
+    }
+
+    /// Phase 8B: Void override — owner loses mass, neighbor does not gain.
+    ///
+    /// Models a hull breach / open-space tile: substance flows out of the owner
+    /// cell and exits the simulation; the "neighbor" index is a phantom
+    /// representing out-of-bounds vacuum and must never receive anything.
+    ///
+    /// FAILING: `apply` returns a single flow value and `process_tile` applies
+    /// it symmetrically to both sides. Void needs `process_tile` to suppress the
+    /// neighbor write — the same calling-convention fix that `Remote` will also
+    /// require (where the neighbor write becomes a network send instead).
+    /// This test is the acceptance criterion for that fix.
+    #[test]
+    fn test_void_delta_is_mass_sink() {
+        use crate::automaton::delta::DeltaKind;
+
+        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+
+        // Isolate the pair: only (0,0,0) and (1,0,0) have mass.
+        // Everything else is at the floor (1), so non-void pairs have zero gradient.
+        let i_a = idx(w, h, 0, 0, 0);
+        let i_b = idx(w, h, 1, 0, 0);
+        ctrl.field.cells[i_a] = 100_000;
+        ctrl.field.cells[i_b] = 1; // floor
+
+        let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+
+        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Void);
+        for _ in 0..16 {
+            ctrl.step_blocking();
+        }
+
+        let mass_after: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+
+        // Void is a sink: mass must decrease (or stay equal if flow happened to be 0).
+        assert!(
+            mass_after <= mass_before,
+            "Void pair must not increase total mass (before={}, after={})",
+            mass_before,
+            mass_after
+        );
+
+        // The neighbor must not have gained from the void pair.
+        let after_b = ctrl.field.cells[i_b];
+        assert_eq!(
+            after_b, 1,
+            "Void pair: neighbor must not receive mass (got {})",
+            after_b
+        );
+
+        // The owner must have lost at least some mass (gradient is large).
+        let after_a = ctrl.field.cells[i_a];
+        assert!(
+            after_a < 100_000,
+            "Void pair: owner must lose mass (still {})",
+            after_a
+        );
+    }
+
+    /// Phase 8B: Modal override produces identical output to no override.
+    #[test]
+    fn test_modal_override_matches_baseline() {
+        use crate::automaton::delta::DeltaKind;
+
+        // Baseline: no overrides.
+        let mut baseline = StepController::new(4, 4, 4, 0, 1);
+        let w = baseline.field.width;
+        let h = baseline.field.height;
+        baseline.field.cells[idx(w, h, 0, 0, 0)] = 50_000;
+        baseline.field.cells[idx(w, h, 1, 0, 0)] = 10_000;
+        baseline.step_blocking();
+        let baseline_cells = baseline.field.cells.clone();
+
+        // With explicit Modal override on the same pair.
+        let mut with_modal = StepController::new(4, 4, 4, 0, 1);
+        with_modal.field.cells[idx(w, h, 0, 0, 0)] = 50_000;
+        with_modal.field.cells[idx(w, h, 1, 0, 0)] = 10_000;
+        let i_a = idx(w, h, 0, 0, 0);
+        let i_b = idx(w, h, 1, 0, 0);
+        with_modal
+            .delta_overrides
+            .insert((i_a, i_b), DeltaKind::Modal);
+        with_modal.step_blocking();
+
+        assert_eq!(
+            baseline_cells, with_modal.field.cells,
+            "Explicit Modal override must produce identical output to no override"
+        );
+    }
+
+    /// Phase 8B: Logged delta accumulates one entry per step across multiple generations.
+    #[test]
+    fn test_logged_delta_accumulates_across_steps() {
+        use crate::automaton::delta::DeltaKind;
+
+        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+
+        let i_a = idx(w, h, 1, 1, 1);
+        let i_b = idx(w, h, 2, 1, 1);
+        ctrl.field.cells[i_a] = 80_000;
+        ctrl.field.cells[i_b] = 1_000;
+
+        ctrl.delta_overrides
+            .insert((i_a, i_b), DeltaKind::new_logged());
+
+        let n_steps = 5;
+        for _ in 0..n_steps {
+            ctrl.step_blocking();
+        }
+
+        let log = ctrl
+            .delta_overrides
+            .get(&(i_a, i_b))
+            .expect("override must survive across steps")
+            .log()
+            .expect("must be Logged variant");
+
+        assert_eq!(
+            log.len(),
+            n_steps,
+            "log must have exactly one entry per step (got {})",
+            log.len()
+        );
+    }
+
+    /// Phase 8B: cell_has_override flag is set for owner cells, clear for all others.
+    #[test]
+    fn test_cell_has_override_flag_population() {
+        use crate::automaton::delta::DeltaKind;
+
+        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+
+        let i_owner1 = idx(w, h, 0, 0, 0);
+        let i_nbr1 = idx(w, h, 1, 0, 0);
+        let i_owner2 = idx(w, h, 2, 1, 0);
+        let i_nbr2 = idx(w, h, 2, 2, 0);
+
+        ctrl.delta_overrides
+            .insert((i_owner1, i_nbr1), DeltaKind::Modal);
+        ctrl.delta_overrides
+            .insert((i_owner2, i_nbr2), DeltaKind::Modal);
+
+        // begin_step populates cell_has_override; we inspect before any tile runs.
+        ctrl.begin_step().expect("begin_step must succeed");
+
+        let step = ctrl.active_step.as_ref().expect("step must be active");
+
+        assert!(
+            step.cell_has_override[i_owner1],
+            "owner1 (idx {}) must have override flag set",
+            i_owner1
+        );
+        assert!(
+            step.cell_has_override[i_owner2],
+            "owner2 (idx {}) must have override flag set",
+            i_owner2
+        );
+        assert!(
+            !step.cell_has_override[i_nbr1],
+            "neighbor1 (idx {}) must NOT have override flag set",
+            i_nbr1
+        );
+        assert!(
+            !step.cell_has_override[i_nbr2],
+            "neighbor2 (idx {}) must NOT have override flag set",
+            i_nbr2
+        );
+
+        // Verify no other cell is incorrectly flagged.
+        let flagged: Vec<usize> = step
+            .cell_has_override
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            flagged,
+            vec![i_owner1, i_owner2],
+            "only registered owner cells must be flagged"
+        );
+    }
+
+    /// Phase 8B: override added after begin_step takes effect next generation, not current.
+    #[test]
+    fn test_override_added_mid_run_deferred() {
+        use crate::automaton::delta::DeltaKind;
+
+        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+
+        let i_a = idx(w, h, 0, 0, 0);
+        let i_b = idx(w, h, 1, 0, 0);
+        ctrl.field.cells[i_a] = 60_000;
+        ctrl.field.cells[i_b] = 1;
+
+        // Begin a step with no overrides, then insert one before it finishes.
+        ctrl.begin_step().expect("begin_step must succeed");
+        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
+
+        // Complete the in-progress step (Mirror was added after begin, so this
+        // step runs without the mirror — flow should have occurred).
+        while !ctrl.tick(u64::MAX) {}
+
+        // The first step ran modal; b should have gained mass from the gradient.
+        let after_first = ctrl.field.cells[i_b];
+        assert!(
+            after_first > 1,
+            "First step (no mirror yet) should allow flow to b (got {})",
+            after_first
+        );
+
+        // Now the override is in ctrl.delta_overrides. Second step picks it up.
+        ctrl.step_blocking();
+        let after_second = ctrl.field.cells[i_b];
+
+        // In the second step the mirror is active; b must not have gained further
+        // from the (i_a, i_b) pair (it may still lose to its own neighbors though).
+        assert!(
+            after_second <= after_first,
+            "Second step (mirror active) must not allow further gain on b (first={}, second={})",
+            after_first,
+            after_second
+        );
+    }
+
+    /// Phase 8B: override on a pair that straddles a tile boundary fires correctly.
+    #[test]
+    fn test_override_across_tile_boundary() {
+        use crate::automaton::delta::DeltaKind;
+
+        // 32×16×16: tiles split at x=16, so (15, 0, 0)→(16, 0, 0) is a boundary pair.
+        let mut ctrl = StepController::new(32, 16, 16, 0, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+
+        let i_a = idx(w, h, 15, 0, 0); // last cell of tile 0
+        let i_b = idx(w, h, 16, 0, 0); // first cell of tile 1
+
+        ctrl.field.cells[i_a] = 200_000;
+        ctrl.field.cells[i_b] = 1;
+
+        ctrl.delta_overrides
+            .insert((i_a, i_b), DeltaKind::new_logged());
+        ctrl.step_blocking();
+
+        let log = ctrl
+            .delta_overrides
+            .get(&(i_a, i_b))
+            .expect("override must survive")
+            .log()
+            .expect("must be Logged");
+
+        assert_eq!(log.len(), 1, "tile-boundary pair must fire exactly once");
+
+        // Flow must be positive (mass from a to b).
+        assert!(
+            log[0] > 0,
+            "tile-boundary flow must be positive for this gradient (got {})",
+            log[0]
+        );
+    }
+
+    /// Phase 8B: morton_encode / build_tile_queue ordering is correct.
+    #[test]
+    fn test_morton_order_2x2x2() {
+        // Hand-computed Morton codes for a 2×2×2 grid of tiles:
+        // Morton(x,y,z) = spread(x) | spread(y)<<1 | spread(z)<<2
+        // For single-bit values: Morton = x | y<<1 | z<<2
+        // (0,0,0)=0  (1,0,0)=1  (0,1,0)=2  (1,1,0)=3
+        // (0,0,1)=4  (1,0,1)=5  (0,1,1)=6  (1,1,1)=7
+        let expected: Vec<(u8, u8, u8)> = vec![
+            (0, 0, 0),
+            (1, 0, 0),
+            (0, 1, 0),
+            (1, 1, 0),
+            (0, 0, 1),
+            (1, 0, 1),
+            (0, 1, 1),
+            (1, 1, 1),
+        ];
+
+        let tiles = build_tile_queue(2, 2, 2);
+        let got: Vec<(u8, u8, u8)> = tiles.iter().map(|t| (t.tx, t.ty, t.tz)).collect();
+
+        assert_eq!(
+            got, expected,
+            "build_tile_queue(2,2,2) must produce tiles in Morton order"
+        );
     }
 }
