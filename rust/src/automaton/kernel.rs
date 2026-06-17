@@ -6,7 +6,7 @@
 
 use std::sync::atomic::AtomicUsize;
 
-use crate::automaton::delta::DeltaOverrides;
+use crate::automaton::delta::{DeltaKind, DeltaOverrides};
 
 pub const TILE_SIZE: i16 = 16;
 

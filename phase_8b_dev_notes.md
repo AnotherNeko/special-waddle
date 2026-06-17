@@ -179,3 +179,64 @@ B was ruled out by the phase-change requirements for goal #1: boiling bubbles re
 D was preferred over A and C because the modal fast path (no override in the map → inline `compute_flow` verbatim, no lookup) keeps the 99.99% case at zero overhead, while A's vtable dispatch and C's per-pair `HashMap` lookup both add real cost at 6M pairs/step.
 
 Note: the delta contract abstraction (Phase C in `process_tile`) is only half of what phase changes need. The Phase B hook (intra-cell state transition: substance identity, phase boundary threshold, latent heat accounting) needs its own design — a per-voxel `(substance_id, mass, thermal_energy)` struct and a material properties table. That's a separate design task before boiling can be demonstrated.
+
+---
+
+## Design session notes (2026-06-17): Delta contract architecture revision
+
+### The "modal is common" assumption is wrong
+
+The fast-path design assumed modal (uniform gradient diffusion) is the 99.99% case and override contracts are rare. This holds for empty/inert chunks (vacuum, solid rock far from players) but inverts in any loaded region:
+
+- Player-built machines: dense override contracts on every active face
+- Subnode assemblies (see below): many contracts per major voxel
+- Multi-rate chunk boundaries: every face between adjacent chunks ticking at different rates
+- Hull breaches, organisms, server boundaries
+
+The performance argument changes: the branch and hash lookup that protect the modal fast path become overhead in exactly the chunks under simulation load. Chunk-level dispatch (not cell-level) is the right granularity — uniform chunks use the implicit 3-per-voxel tight loop, active chunks use an explicit flat contract list iterated without per-entry branching.
+
+### Delta contracts as bound vectors / graph edges
+
+A delta contract is an edge in a directed graph: it has a read-source (two cell values to diff), a write-target (where to apply the flow), and a flow computation. The 3-per-voxel spatial structure is a regular graph embedded in 3D. Nothing requires the graph to be regular.
+
+The "neighbor" cell is the common case for the edge target, not a fixed assumption of the model. Its delta contracts express the simplest bound vector between two cells, but alternative or longer or out-of-bounds bound vectors are also possible inside of alternative delta contracts.
+
+### Additive extra-contracts model
+
+Rather than overriding/replacing existing spatial contracts, special voxels get **additional contracts** beyond their 3 spatial ones. The spatial contract on the affected face becomes Mirror (zero flow), and the extra contract carries the non-local or non-modal behavior. This is compositional:
+
+- Space boundary face: Mirror on the spatial pair + Void extra contract (drain to bottomless vacuum)
+- Portal face: Mirror on both spatial pairs + Remote extra contract linking the two mouths
+- Multi-rate boundary: spatial contract stays but gains a Buffered accumulator alongside it
+
+Hot path for an active chunk iterates a flat contract list with no per-entry kind dispatch. Each entry carries everything needed: read-source values (real or virtual), write targets (real or discard/network), and the flow computation variant. Normal voxels in a uniform chunk have no explicit contract list — the implicit 3-per-voxel loop handles them.
+
+This maps directly onto the FEM framing from the optozorax report: portals are off-diagonal entries added to the stiffness matrix K, not modifications of existing entries.
+
+### Void is directed (not symmetric)
+
+From the optozorax FEM report: a void (single-mouth portal to nowhere) is **not** a degenerate symmetric portal pair. It is a directed absorbing sink that intentionally breaks stiffness-matrix symmetry. Symmetric coupling conserves the field; a one-way coupling or per-cell loss term is the discrete signature of a sink.
+
+Void: owner loses mass (subtracted from `target[idx_a]`), spatial neighbor does NOT gain (`target[idx_b]` write suppressed). The virtual neighbor value for gradient computation is 0 (bottomless vacuum, permanently at floor).
+
+### Remote is symmetric coupling across a topological discontinuity
+
+From the optozorax FEM report: portal mouths are identified so the field is C¹-continuous across them. The gradient is computed from the two non-adjacent cell values with no distance correction ("surface irrelevance"). Flow is applied to both sides symmetrically. Conservation holds globally even though it appears violated locally on each server during network latency.
+
+Remote is NOT void + later correction. It is symmetric coupling with async resolution.
+
+### Open DeltaKind taxonomy
+
+DeltaKinds are **not** being reduced to a minimal set. New kinds will be added as needed. Shared implementation lives in inline helper functions (`compute_flow` is already this pattern), not in trait unification. Current known kinds:
+
+- `Modal` — uniform gradient diffusion, implicit fast path, no stored state
+- `Mirror` — zero flow, insulating boundary (neutronium, map edges)
+- `Logged` — diagnostic wrapper, records flow values per step
+- `Void` — directed sink, virtual neighbor = bottomless vacuum (always 0), suppress neighbor write
+- `Buffered` — cross-chunk multi-rate accumulator, same flow formula as Modal but accumulates across fast ticks and drains on slow-chunk tick
+- `Remote` — cross-server symmetric coupling, async resolution, virtual neighbor = cached remote cell value
+- `EntityExchange` — one end is a Luanti entity (not a voxel index), entity applies homeostasis resistance logic rather than passive diffusion; entity actively resists the gradient
+
+### Subnode assemblies (future)
+
+A player-built engine or machine fits inside a major voxel grid cell but contains many smaller internal nodes. The major voxel's face contracts are determined by the internal sub-simulation. Implementation: subnode assembly produces a set of effective face contracts that are inserted into the parent chunk's contract list. The parent simulation sees extra graph edges; it does not know or care about the internal structure.
