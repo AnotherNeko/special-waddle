@@ -86,3 +86,109 @@ impl DeltaKind {
 /// The owner index is always the lower-xyz cell of the pair (owner-writes-positive scheme).
 /// The neighbor index for `Void` and `Remote` pairs may be out of bounds or fictional.
 pub type DeltaOverrides = std::collections::HashMap<(usize, usize), DeltaKind>;
+
+// ---------------------------------------------------------------------------
+// Flat contract list (replaces DeltaOverrides long-term)
+// ---------------------------------------------------------------------------
+//
+// A contract is a graph edge: two endpoints, a flow computation, and write
+// targets. The 3-per-voxel spatial loop is the implicit regular graph; this
+// list holds only the extra edges that fall outside it (mirror faces, portals,
+// hull breaches, entity exchanges, cross-server links).
+//
+// Memory layout by topology:
+//
+//   Local (Modal, Mirror, Buffered, Void, Portal): both endpoints are u32
+//   voxel indices in this field. Void's B-side read is virtual const-0
+//   (bottomless vacuum); its B-side write is discarded. Portal's endpoints
+//   are also plain u32 indices — topologically non-adjacent but in the same
+//   address space, so no extra storage.
+//
+//   Non-local (Remote, Entity): one endpoint requires extra data that doesn't
+//   fit in a u32. Remote needs a server ID, a remote voxel index, a cached
+//   ghost value, and an accumulator (~20 bytes). Entity needs an opaque Lua
+//   object reference (8 bytes). These store a u32 `aux_idx` in src_b/dst_b
+//   pointing into the appropriate side table (remote_endpoints or
+//   entity_handles). The Contract entry itself stays fixed-size for every
+//   kind, keeping the hot loop uniform-width and cache-friendly.
+//
+// ContractKind drives interpretation of src_b/dst_b:
+//   Modal / Mirror / Portal / Buffered  →  local voxel index
+//   Void / Infinity                     →  src_b unused (read 0); dst_b unused (discard)
+//   Remote / Entity                     →  aux_idx into side table
+
+/* TODO: `Infinity` is like Void but
+the contract stores a snapshot of a tile which can source or sink flow but
+resets to a value configured in the in-game creative mode gui (instead of
+always being vacuum). Like the infinity pipe in Factorio 1.1 */
+
+/// Side-table entry for Remote contracts.
+pub struct RemoteEndpoint {
+    pub server_id: u32, //might become an ipv6 address
+    pub remote_voxel: u32,
+    /// Last-known value of the remote cell (ghost cell, updated each network sync).
+    pub cached_value: u32,
+    /// Flow accumulated since last network sync.
+    pub accumulated: i64,
+}
+
+/// Side-table entry for Entity contracts.
+pub struct EntityHandle {
+    /// Opaque Lua registry reference; resolved by the FFI layer, not Rust.
+    pub lua_ref: u64,
+}
+
+/// A single non-spatial graph edge in the contract list.
+///
+/// All fields are fixed-size. `src_b` and `dst_b` are plain `u32` whose
+/// meaning is kind-driven — see the module comment above.
+pub struct Contract {
+    pub src_a: u32,
+    pub src_b: u32,
+    pub dst_a: u32,
+    pub dst_b: u32,
+    pub kind: ContractKind,
+}
+
+pub enum ContractKind {
+    /// Normal gradient diffusion, symmetric. Equivalent to the implicit spatial loop.
+    Modal,
+    /// Zero flow, insulating boundary (neutronium, map edges).
+    Mirror,
+    /// Symmetric coupling to a non-adjacent cell in the same grid (portal mouth).
+    Portal,
+    /// Directed mass sink. B-side read is virtual 0; B-side write is discarded.
+    Void,
+    /// Same formula as Modal but accumulates across fast ticks, drains on slow-chunk tick.
+    Buffered { accumulated: i64 },
+    /// Cross-server symmetric coupling. src_b/dst_b index into `remote_endpoints`.
+    /// Async: flow accumulates until the next network sync.
+    Remote,
+    /// One endpoint is a Luanti entity. src_b/dst_b index into `entity_handles`.
+    /// Entity applies homeostasis resistance rather than passive diffusion;
+    /// it ticks at the Lua entity rate, not the voxel rate.
+    Entity,
+}
+
+/// Flat list of non-spatial contracts for a field region.
+pub struct ContractList {
+    pub contracts: Vec<Contract>,
+    /// Side table for Remote contracts; indexed by Contract::src_b / dst_b.
+    pub remote_endpoints: Vec<RemoteEndpoint>,
+    /// Side table for Entity contracts; indexed by Contract::src_b / dst_b.
+    pub entity_handles: Vec<EntityHandle>,
+}
+
+impl ContractList {
+    pub fn new() -> Self {
+        ContractList {
+            contracts: Vec::new(),
+            remote_endpoints: Vec::new(),
+            entity_handles: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.contracts.is_empty()
+    }
+}

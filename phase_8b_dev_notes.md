@@ -40,85 +40,11 @@ elaborate the advantages and differences of each approach to the problem.
 Let me think through this carefully against the codebase.
 
 **Approach A: Full lifecycle trait from the start**
-
-```rust
-trait DeltaContract {
-    fn accumulate(&mut self, source_a: u32, source_b: u32) -> i64;
-    fn resolve(&mut self) -> (i64, i64);  // (delta_to_a, delta_to_b)
-    fn is_resolved(&self) -> bool;
-}
-```
-
-Advantages:
-- Every future contract type (rate-mismatched, network, subnode) fits naturally. You never retrofit the abstraction.
-- `PersistentDelta` (Phase 9) and `RemoteDelta` (Phase 11/ClusterIO) are just implementations that return `is_resolved() = false` until their slow side ticks or the network drains.
-- `LoggingDelta` wraps any contract and observes its lifecycle — you can log a network delta's accumulation over 60 fast ticks before it resolves, which is the diagnostic tool you actually need for Phase 9+ debugging.
-- The modal case implements `accumulate` + `resolve` in one call, `is_resolved` always returns true. Trivial.
-
-Disadvantages:
-- The hot path today processes ~2 million pairs per axis on a 128³ grid. Even if you keep the modal path as a non-trait fast path and only use the trait for override pairs, you need a mechanism to *select* which pairs get contracts. That's a lookup on every pair — a branch or a hash check in the inner loop.
-- More concretely: `process_tile` in `incremental.rs` iterates cells and computes flows inline. To support per-pair contract overrides, you'd need either (a) a sparse map of `(idx_a, idx_b) -> Box<dyn DeltaContract>` checked per pair, or (b) a cell-level flag marking "this cell has non-modal contracts." Both add overhead to the modal path.
-- You're designing the persistence model (when does a delta get serialized? who owns it?) before having a consumer. Phase 9 will tell you what persistence actually needs to look like — designing it now risks building the wrong thing.
-- The `accumulate`/`resolve` split implies deltas live across ticks, which means they need storage, ownership, and lifecycle management (creation, resolution, garbage collection). That's a state management system, not just a trait.
-
+(omitted)
 **Approach B: Narrow extraction — composable flow computation**
-
-```rust
-trait FlowCompute {
-    fn compute(&mut self, source_a: u32, source_b: u32, conductivity: i64, divisor: i64) -> i64;
-}
-```
-
-Advantages:
-- Directly replaces the `compute_flow` function that exists today. Drop-in.
-- `FlowDelta` is the current formula. `LoggingDelta` wraps it and logs. Test passes immediately — you verify logged flows match the fused baseline on 128³ exactly as the ARCHITECTURE.md specifies.
-- Zero overhead on the modal path — `FlowDelta::compute` inlines to the same code as today.
-- Small, provable, shippable. You get the "can observe any pair's flow" capability that Track 8B asks for.
-
-Disadvantages:
-- Doesn't model persistence, timing, or element identity at all. When Phase 9 arrives with rate-mismatched regions, this trait doesn't help — you'd need to design the lifecycle abstraction then anyway.
-- A subnode assembly doesn't compute flow via gradient diffusion at all. A machine port might inject at a fixed rate, or pull on demand. `FlowCompute` assumes gradient-driven diffusion, which is only one flow computation strategy.
-- `LoggingDelta` under this approach can only log what happens within a single synchronous step. It can't observe the multi-tick accumulation of a persistent delta because that concept doesn't exist yet.
-- Basically: you refactor the leaf, not the branch point. The next phase will require a different, larger abstraction that subsumes this one.
-
+(omitted)
 **Approach C: Element + Contract registry, modal as special case**
-
-Don't trait-ify the flow computation. Instead, introduce the `ElementId` and `Delta` structures from the architecture doc, plus a registry that the stepping kernel consults:
-
-```rust
-enum ElementId {
-    Voxel(usize),
-    MachineSubnode(u32, u16),
-}
-
-struct Delta {
-    a: ElementId,
-    b: ElementId,
-    quantity: i64,
-    state: DeltaState,  // Pending, Accumulated, Resolved
-}
-
-struct DeltaRegistry {
-    overrides: HashMap<(usize, usize), DeltaId>,  // voxel pair -> delta
-    deltas: Vec<Delta>,
-}
-```
-
-The stepping kernel checks `registry.overrides` for each pair. If present, it routes through the delta's lifecycle. If absent, it does the inline modal computation as today.
-
-Advantages:
-- Models the actual problem: deltas are *data*, not *behavior*. A network delta and a modal delta have the same struct, different lifecycle state. The contract between two elements is a row in a table, not an object with methods.
-- The registry naturally supports the diagnostic need: iterate all deltas, filter by element, log flows. No wrapper pattern needed.
-- Subnode assemblies work immediately: a machine registers N deltas connecting its ports to surrounding voxels. The registry holds them. The stepping kernel processes them when it encounters those voxel indices.
-- Scales to network: a `RemoteElement` variant on `ElementId` means the delta's resolution is deferred. The registry just holds it in `Accumulated` state until the network layer drains it.
-- The modal path stays fast: no override entry in the registry means the kernel does exactly what it does today. The registry check is a hash lookup that misses on 99.99% of pairs — branch predictor eats it.
-
-Disadvantages:
-- The `HashMap` lookup per pair is real overhead even if branch-predicted. On 128³ with 3 axes, that's ~6 million lookups per step. Even at 5ns each that's 30ms — significant against the ~100ms per-step budget.
-- More realistically, you'd want a bitfield or per-cell flag to skip the lookup entirely for cells with no overrides. That's additional data structure to maintain.
-- Bigger scope than 8B asks for. The registry, element IDs, delta lifecycle states — that's getting into Phase 9-10 territory. You'd be building infrastructure before the test that validates it.
-- The `Delta` struct in the architecture doc has `accumulate_rate` and `resolve_rate` fields. You'd need to decide now whether those drive the lifecycle or whether they're advisory metadata. That's a design decision that benefits from Phase 9's concrete requirements.
-
+(omitted)
 **Approach D: Hybrid — lifecycle trait with data-oriented fast path**
 
 Define the full lifecycle abstraction, but implement it as a data-oriented system rather than trait objects:
@@ -236,6 +162,22 @@ DeltaKinds are **not** being reduced to a minimal set. New kinds will be added a
 - `Buffered` — cross-chunk multi-rate accumulator, same flow formula as Modal but accumulates across fast ticks and drains on slow-chunk tick
 - `Remote` — cross-server symmetric coupling, async resolution, virtual neighbor = cached remote cell value
 - `EntityExchange` — one end is a Luanti entity (not a voxel index), entity applies homeostasis resistance logic rather than passive diffusion; entity actively resists the gradient
+
+table to help u:
+DeltaKind taxonomy by axis:
+
+| Kind | Physics | Temporal | Topology |
+|---|---|---|---|
+| Modal | normal | sync | local |
+| Mirror | zero flow | sync | local |
+| Buffered | normal | async | local |
+| Void | sink | sync | non-local (virtual) |
+| Remote | normal | async | non-local |
+| Entity | extradimensional | async (Lua entity ticks at a different rate) | local (nearby Lua entity) |
+| portal | normal | undefined | non-local but in the same grid (unlike remote) |
+more deltakinds will be added
+`Buffered` is Modal + temporal async. `Remote` is Buffered + topological non-local. They compose.
+
 
 ### Subnode assemblies (future)
 
