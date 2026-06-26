@@ -6,9 +6,12 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::automaton::delta::DeltaOverrides;
+use crate::automaton::delta::{ContractList, DeltaOverrides};
 use crate::automaton::field::{create_field, Field};
-use crate::automaton::kernel::{build_tile_queue, process_tile, IncrementalStep, TILE_SIZE};
+use crate::automaton::kernel::{
+    build_tile_queue, process_contract_list, process_portal_overrides, process_tile,
+    IncrementalStep, TILE_SIZE,
+};
 
 /// Manages the lifecycle of incremental steps for a Field.
 pub struct StepController {
@@ -24,6 +27,9 @@ pub struct StepController {
     /// Persistent delta overrides. Moved into IncrementalStep on begin_step,
     /// returned here on finalize_step (with updated log entries, etc.).
     pub delta_overrides: DeltaOverrides,
+
+    /// Flat contract list (extra graph edges beyond the 3-per-voxel spatial loop).
+    pub contract_list: ContractList,
 }
 
 impl StepController {
@@ -50,6 +56,7 @@ impl StepController {
             active_step: None,
             thread_pool,
             delta_overrides: DeltaOverrides::default(),
+            contract_list: ContractList::new(),
         }
     }
 
@@ -75,6 +82,7 @@ impl StepController {
             active_step: None,
             thread_pool,
             delta_overrides: DeltaOverrides::default(),
+            contract_list: ContractList::new(),
         }
     }
 
@@ -168,7 +176,14 @@ impl StepController {
     }
 
     fn finalize_step(&mut self) {
-        if let Some(step) = self.active_step.take() {
+        if let Some(mut step) = self.active_step.take() {
+            process_portal_overrides(&mut step);
+            process_contract_list(
+                &step.source,
+                &mut step.target,
+                &mut self.contract_list,
+                step.diffusion_rate,
+            );
             self.field.cells = step.target;
             self.field.generation = step.target_generation;
             self.delta_overrides = step.delta_overrides;
@@ -784,17 +799,12 @@ mod tests {
         );
     }
 
-    /// Phase 8B: Void override — owner loses mass, neighbor does not gain.
+    /// Phase 8B: Void override — consumed accumulator accounts for all missing mass.
     ///
-    /// Models a hull breach / open-space tile: substance flows out of the owner
-    /// cell and exits the simulation; the "neighbor" index is a phantom
-    /// representing out-of-bounds vacuum and must never receive anything.
-    ///
-    /// FAILING: `apply` returns a single flow value and `process_tile` applies
-    /// it symmetrically to both sides. Void needs `process_tile` to suppress the
-    /// neighbor write — the same calling-convention fix that `Remote` will also
-    /// require (where the neighbor write becomes a network send instead).
-    /// This test is the acceptance criterion for that fix.
+    /// `Void { consumed }` records flow drained each step, like a production quota
+    /// counter. After N steps, `consumed` must equal the total mass removed from
+    /// the field. This holds regardless of grid size, step count, or which other
+    /// cells mass diffused through before reaching the sink.
     #[test]
     fn test_void_delta_is_mass_sink() {
         use crate::automaton::delta::DeltaKind;
@@ -803,44 +813,34 @@ mod tests {
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
-        // Isolate the pair: only (0,0,0) and (1,0,0) have mass.
-        // Everything else is at the floor (1), so non-void pairs have zero gradient.
         let i_a = idx(w, h, 0, 0, 0);
         let i_b = idx(w, h, 1, 0, 0);
-        ctrl.field.cells[i_a] = 100_000;
-        ctrl.field.cells[i_b] = 1; // floor
+        ctrl.field.cells[i_a] = 1_000_000;
 
         let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
 
-        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Void);
+        ctrl.delta_overrides
+            .insert((i_a, i_b), DeltaKind::Void { consumed: 0 });
         for _ in 0..16 {
             ctrl.step_blocking();
         }
 
         let mass_after: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+        let mass_lost = mass_before - mass_after;
 
-        // Void is a sink: mass must decrease (or stay equal if flow happened to be 0).
+        let consumed = match ctrl.delta_overrides.get(&(i_a, i_b)).unwrap() {
+            DeltaKind::Void { consumed } => *consumed as u64,
+            _ => panic!("expected Void"),
+        };
+
         assert!(
-            mass_after <= mass_before,
-            "Void pair must not increase total mass (before={}, after={})",
-            mass_before,
-            mass_after
+            consumed > 0,
+            "Void: no flow was recorded (sink never activated)"
         );
-
-        // The neighbor must not have gained from the void pair.
-        let after_b = ctrl.field.cells[i_b];
         assert_eq!(
-            after_b, 1,
-            "Void pair: neighbor must not receive mass (got {})",
-            after_b
-        );
-
-        // The owner must have lost at least some mass (gradient is large).
-        let after_a = ctrl.field.cells[i_a];
-        assert!(
-            after_a < 100_000,
-            "Void pair: owner must lose mass (still {})",
-            after_a
+            consumed, mass_lost,
+            "Void: consumed ({}) must equal mass removed from field ({})",
+            consumed, mass_lost
         );
     }
 
@@ -1080,4 +1080,246 @@ mod tests {
             "build_tile_queue(2,2,2) must produce tiles in Morton order"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Helpers shared by the topology tests below.
+    // -----------------------------------------------------------------------
+
+    /// Translate field `cells` by `(dx, dy, dz)` on a 3-torus (wrapping).
+    fn torus_translate(
+        cells: &[u32],
+        w: i16,
+        h: i16,
+        d: i16,
+        dx: i16,
+        dy: i16,
+        dz: i16,
+    ) -> Vec<u32> {
+        let mut out = vec![0u32; cells.len()];
+        for z in 0..d {
+            for y in 0..h {
+                for x in 0..w {
+                    let src = idx(w, h, x, y, z);
+                    let tx = (x + dx).rem_euclid(w);
+                    let ty = (y + dy).rem_euclid(h);
+                    let tz = (z + dz).rem_euclid(d);
+                    let dst = idx(w, h, tx, ty, tz);
+                    out[dst] = cells[src];
+                }
+            }
+        }
+        out
+    }
+
+    /// Fuzzy congruence: sum of |a[i] - b[i]| / (cell_count * steps) < threshold.
+    /// Accounts for the kernel's stochastic rounding noise.
+    fn fuzzy_congruent(a: &[u32], b: &[u32], steps: u32, threshold: f64) -> bool {
+        assert_eq!(a.len(), b.len());
+        let total_diff: u64 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(&av, &bv)| (av as i64 - bv as i64).unsigned_abs())
+            .sum();
+        let noise_per_cell_per_step = total_diff as f64 / (a.len() as f64 * steps as f64);
+        noise_per_cell_per_step < threshold
+    }
+
+    /// Register Portal contracts to wrap all 6 boundary face-pairs on a cube,
+    /// turning the field into a 3-torus. Adds Mirror on each spatial boundary
+    /// pair and a Portal extra-contract linking the opposing face.
+    ///
+    /// This function uses DeltaOverrides (the current mechanism) as a stand-in
+    /// until ContractList processing is wired into the kernel. The Portal kind
+    /// will be migrated to ContractList when the kernel supports it.
+    fn register_3torus_portals(ctrl: &mut StepController) {
+        use crate::automaton::delta::DeltaKind;
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+        let d = ctrl.field.depth;
+
+        // X axis: connect x=W-1 to x=0 for every (y, z).
+        for z in 0..d {
+            for y in 0..h {
+                let i_last = idx(w, h, w - 1, y, z);
+                let i_wrap = idx(w, h, 0, y, z);
+                ctrl.delta_overrides
+                    .insert((i_last, i_wrap), DeltaKind::Portal);
+            }
+        }
+        // Y axis: connect y=H-1 to y=0 for every (x, z).
+        for z in 0..d {
+            for x in 0..w {
+                let i_last = idx(w, h, x, h - 1, z);
+                let i_wrap = idx(w, h, x, 0, z);
+                ctrl.delta_overrides
+                    .insert((i_last, i_wrap), DeltaKind::Portal);
+            }
+        }
+        // Z axis: connect z=D-1 to z=0 for every (x, y).
+        for y in 0..h {
+            for x in 0..w {
+                let i_last = idx(w, h, x, y, d - 1);
+                let i_wrap = idx(w, h, x, y, 0);
+                ctrl.delta_overrides
+                    .insert((i_last, i_wrap), DeltaKind::Portal);
+            }
+        }
+    }
+
+    /// Phase 8B+: Portal — 3-torus topology congruence test.
+    ///
+    /// On a 3-torus all positions are equivalent: a blob at the center and a
+    /// blob at the corner must produce the same diffusion history up to a
+    /// toroidal coordinate shift. After N steps both fields are translated to
+    /// align and checked for fuzzy congruence (noise < 0.3 units/cell/step).
+    #[test]
+    fn test_portal_3torus_congruence() {
+        use crate::automaton::delta::DeltaKind;
+        let (w, h, d) = (32i16, 32i16, 32i16);
+        let steps = 20u32;
+        let blob_mass = 1_000_000u32;
+
+        // --- Field A: blob at center ---
+        let mut ctrl_a = StepController::new(w, h, d, 3, 1);
+        let cx = w / 2;
+        let cy = h / 2;
+        let cz = d / 2;
+        ctrl_a.field.cells[idx(w, h, cx, cy, cz)] = blob_mass;
+        register_3torus_portals(&mut ctrl_a);
+        for _ in 0..steps {
+            ctrl_a.step_blocking();
+        }
+
+        // --- Field B: blob at corner (0,0,0) ---
+        let mut ctrl_b = StepController::new(w, h, d, 3, 1);
+        ctrl_b.field.cells[idx(w, h, 0, 0, 0)] = blob_mass;
+        register_3torus_portals(&mut ctrl_b);
+        for _ in 0..steps {
+            ctrl_b.step_blocking();
+        }
+
+        // Translate B by (cx, cy, cz) so its origin aligns with A's center blob.
+        let b_translated = torus_translate(&ctrl_b.field.cells, w, h, d, cx, cy, cz);
+
+        assert!(
+            fuzzy_congruent(&ctrl_a.field.cells, &b_translated, steps, 0.3),
+            "3-torus: center-blob and corner-blob fields must be congruent after {} steps \
+             (noise threshold 0.3 units/cell/step)",
+            steps
+        );
+    }
+
+    /// Phase 8B+: Buffered — cross-rate-boundary accumulation.
+    ///
+    /// Two adjacent cells: A ticks every step (fast), B is only updated by a
+    /// Buffered contract that drains every `drain_every` steps (slow). After
+    /// `drain_every` fast steps the Buffered contract fires once, transferring
+    /// the accumulated flow to B. Checks: (1) B is unchanged until drain tick,
+    /// (2) after drain, A+B mass equals the original total, (3) flow direction
+    /// matches gradient (mass moves from high to low).
+    #[test]
+    fn test_buffered_drains_on_slow_tick() {
+        use crate::automaton::delta::{Contract, ContractKind, ContractList, DeltaKind};
+
+        let (w, h, d) = (8i16, 8i16, 8i16);
+        let drain_every = 4u32;
+        let i_a = idx(w, h, 0, 0, 0);
+        let i_b = idx(w, h, 1, 0, 0);
+
+        let mut ctrl = StepController::new(w, h, d, 3, 1);
+        // Large gradient: A has mass, B is at floor.
+        ctrl.field.cells[i_a] = 100_000;
+        ctrl.field.cells[i_b] = 1;
+
+        let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+        let b_before = ctrl.field.cells[i_b];
+
+        // Suppress the normal spatial flow on (i_a, i_b): the Buffered contract in
+        // ContractList is the sole channel between them. Without this Mirror the tile
+        // pass would apply modal diffusion each step, defeating the drain-every logic.
+        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
+
+        // Register a Buffered contract between i_a and i_b.
+        ctrl.contract_list.contracts.push(Contract {
+            src_a: i_a as u32,
+            src_b: i_b as u32,
+            dst_a: i_a as u32,
+            dst_b: i_b as u32,
+            kind: ContractKind::Buffered {
+                accumulated: 0,
+                drain_every,
+                ticks: 0,
+            },
+        });
+
+        // Run (drain_every - 1) steps: B must not have changed from the Buffered contract.
+        for _ in 0..(drain_every - 1) {
+            ctrl.step_blocking();
+        }
+        assert_eq!(
+            ctrl.field.cells[i_b], b_before,
+            "Buffered: B must not change before drain tick"
+        );
+
+        // Run one more step (the drain tick).
+        ctrl.step_blocking();
+
+        let mass_after: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+        assert_eq!(
+            mass_before, mass_after,
+            "Buffered: mass must be conserved across drain (before={}, after={})",
+            mass_before, mass_after
+        );
+        assert!(
+            ctrl.field.cells[i_b] > b_before,
+            "Buffered: B must have gained mass after drain (still {})",
+            ctrl.field.cells[i_b]
+        );
+        assert!(
+            ctrl.field.cells[i_a] < 100_000,
+            "Buffered: A must have lost mass after drain"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Entity API sketch — diving suit scenario
+    // -----------------------------------------------------------------------
+    //
+    // A player wearing a rebreathing diving suit:
+    //   - Does NOT exchange substance (gas/liquid) with surroundings.
+    //   - DOES exchange heat with surroundings at a fixed conductivity.
+    //   - Maintains a constant internal temperature (homeostasis).
+    //   - Moves around the field, so the entity contract must be relocatable.
+    //
+    // Proposed API shape:
+    //
+    //   ctrl.contract_list.push_entity(
+    //       i_voxel,                        // which voxel the entity currently occupies
+    //       EntityHandle { lua_ref: 42 },   // opaque Lua reference for callback
+    //       EntityContractFlags::HEAT_ONLY, // substance blocked, heat allowed
+    //   );
+    //
+    //   // To move the entity each Lua tick:
+    //   ctrl.contract_list.move_entity(lua_ref, new_voxel_idx);
+    //
+    //   // The Rust kernel calls back into Lua each step to get the entity's
+    //   // current temperature and applies it as:
+    //   //   flow = compute_flow(voxel_val - entity_temp, conductivity, ...)
+    //   //   target[voxel] += flow   // voxel gains/loses heat toward entity temp
+    //   //   (entity side: Lua callback receives `flow`, applies homeostasis logic)
+    //
+    // Open questions before implementation:
+    //   1. Who holds the entity's current value — Rust (cached in EntityHandle)
+    //      or Lua (polled each step via callback)? Caching in Rust avoids FFI
+    //      overhead per cell per step; polling from Lua is simpler and safer.
+    // a1) well I guess this is a symptom of this mod being not quite native to Luanti. It's not really a native Lua module, it's a wrapper around a native Rust kernel. That means the obvious implementation of just having the entity and the field in the same program is not so available unless the mod is much closer integrated into Luanti! I believe Luanti has an available Lua module to store modded data about the entity which can be fetched as a single struct or value from the Lua side in one light api call, and the result converted in place into a Rust struct or value describing the entity's current state, and sent back to the Lua side of that entity via one light api call.
+    //   2. Homeostasis resistance: does the entity just clamp its value back to
+    //      T_body after each step (Lua callback discards the flow delta), or
+    //      does it have a finite thermal mass that warms/cools slowly?
+    // a2) in ONI, the entity homeostatis is a bang-bang controller that
+    //      burns the Dupe's internal resource "kcal" to maintain temperature. For testing purposes, you can assume the entity's homeostatis has effectively infinite fuel and won't starve.
+    //   3. Substance blocking: does this need a per-field-quantity flag on the
+    //      contract, or is the diving suit modeled as Mirror for all non-heat
+    //      quantities and Entity only for the heat field?
+    // a3) well, that depends how the entity is implemented, but it probably will be an Entity deltakind member of all the Rust-simulated fields and have different conductivities, so like if a humanoid physics entity jumps from the STP air to liquid nitrogen, it will drown (substances field) and freeze (heat field) and sink (buoyancy - pressure fields), similarly for electric fields, etc.
 }

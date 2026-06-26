@@ -37,8 +37,13 @@ pub enum DeltaKind {
     /// Use for map-edge tiles that must never exchange substance (neutronium).
     Mirror,
     /// Mass sink — owner loses substance, neighbor receives nothing.
+    /// `consumed` accumulates total flow drained, analogous to `Logged::log`.
     /// Use for cells adjacent to out-of-bounds vacuum (open space, hull breach).
-    Void,
+    Void { consumed: i64 },
+    /// Symmetric coupling to a non-adjacent cell in the same grid (portal mouth).
+    /// Flow is computed and applied to both sides just like Modal; the kernel
+    /// uses the two endpoint indices directly rather than the implicit spatial neighbor.
+    Portal,
     // Remote: portal to a field on another game server (Clusterio). Like Void,
     // the neighbor index is non-local; the flow is forwarded over the network.
     // Needs async accumulation design before implementation.
@@ -62,11 +67,15 @@ impl DeltaKind {
                 log.push(flow);
                 flow
             }
-            // Zero flow: neutronium-style hard insulation.
+            // Zero flow: neutronium-style perfect insulation.
             DeltaKind::Mirror => 0,
-            // Full flow from owner, but process_tile must not write the neighbor.
-            // Returning `flow` here is correct once the caller is fixed.
-            DeltaKind::Void => flow,
+            DeltaKind::Void { consumed } => {
+                *consumed += flow;
+                flow
+            }
+            // Symmetric coupling to a non-adjacent cell; same as Modal from apply()'s perspective.
+            // The kernel must use the correct endpoint indices rather than the implicit neighbor.
+            DeltaKind::Portal => flow,
         }
     }
 
@@ -160,7 +169,12 @@ pub enum ContractKind {
     /// Directed mass sink. B-side read is virtual 0; B-side write is discarded.
     Void,
     /// Same formula as Modal but accumulates across fast ticks, drains on slow-chunk tick.
-    Buffered { accumulated: i64 },
+    /// `drain_every`: how many fast ticks between drains. `ticks`: counter since last drain.
+    Buffered {
+        accumulated: i64,
+        drain_every: u32,
+        ticks: u32,
+    },
     /// Cross-server symmetric coupling. src_b/dst_b index into `remote_endpoints`.
     /// Async: flow accumulates until the next network sync.
     Remote,
