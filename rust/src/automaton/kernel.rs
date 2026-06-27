@@ -6,7 +6,7 @@
 
 use std::sync::atomic::AtomicUsize;
 
-use crate::automaton::delta::{ContractKind, ContractList, DeltaKind, DeltaOverrides};
+use crate::automaton::delta::{ContractKind, ContractList, NeighborOverrides};
 
 pub const TILE_SIZE: i16 = 16;
 
@@ -48,7 +48,7 @@ pub struct IncrementalStep {
 
     /// Sparse per-pair contract overrides. Key: (owner_idx, neighbor_idx).
     /// Empty for fully-modal fields.
-    pub delta_overrides: DeltaOverrides,
+    pub delta_overrides: NeighborOverrides,
 
     /// Per-cell flag: true if this cell owns at least one override pair.
     /// Checked before the hash lookup to keep the modal fast path branch-free.
@@ -107,7 +107,12 @@ fn field_index(field: &IncrementalStep, x: i16, y: i16, z: i16) -> usize {
 /// fluctuations: a true zero-energy state is physically impossible, and achieving one in-game
 /// triggers an energy release. To be addressed in a future physics engine revision.
 #[inline]
-pub fn compute_flow(gradient: i64, conductivity: i64, divisor: i64, remainder_acc: &mut i64) -> i64 {
+pub fn compute_flow(
+    gradient: i64,
+    conductivity: i64,
+    divisor: i64,
+    remainder_acc: &mut i64,
+) -> i64 {
     let product = gradient * conductivity;
     let flow_truncated = product / divisor;
     let remainder = product % divisor;
@@ -126,12 +131,10 @@ pub fn compute_flow(gradient: i64, conductivity: i64, divisor: i64, remainder_ac
     }
 }
 
-/// Resolve the flow and whether to suppress the b-side write for a spatial pair.
-/// Checks the override map when `check` is true; falls back to modal otherwise.
-/// Returns `(flow, suppress_b_write)`.
+/// Resolve the flow for a spatial pair, checking the override map when `check` is true.
 #[inline(always)]
 fn resolve_pair(
-    overrides: &mut DeltaOverrides,
+    overrides: &mut NeighborOverrides,
     check: bool,
     idx_a: usize,
     idx_b: usize,
@@ -139,23 +142,20 @@ fn resolve_pair(
     conductivity: i64,
     divisor: i64,
     remainder_acc: &mut i64,
-) -> (i64, bool) {
+) -> i64 {
     if check {
         if let Some(kind) = overrides.get_mut(&(idx_a, idx_b)) {
-            let suppress = matches!(kind, DeltaKind::Void { .. });
-            return (kind.apply(gradient, conductivity, divisor, remainder_acc, compute_flow), suppress);
+            return kind.apply(gradient, conductivity, divisor, remainder_acc, compute_flow);
         }
     }
-    (compute_flow(gradient, conductivity, divisor, remainder_acc), false)
+    compute_flow(gradient, conductivity, divisor, remainder_acc)
 }
 
-/// Apply a resolved flow to the target buffer. Suppresses the b-side write for Void.
+/// Apply a resolved flow symmetrically to both sides of a spatial pair.
 #[inline(always)]
-fn apply_pair(target: &mut [u32], idx_a: usize, idx_b: usize, flow: i64, suppress_b: bool) {
+fn apply_pair(target: &mut [u32], idx_a: usize, idx_b: usize, flow: i64) {
     target[idx_a] = ((target[idx_a] as i64) - flow) as u32;
-    if !suppress_b {
-        target[idx_b] = ((target[idx_b] as i64) + flow) as u32;
-    }
+    target[idx_b] = ((target[idx_b] as i64) + flow) as u32;
 }
 
 /// Process a single 16³ tile. Computes phase C (diffusion flows).
@@ -196,8 +196,17 @@ pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
                 if x + 1 < step.width {
                     let idx_b = field_index(step, x + 1, y, z);
                     let gradient = step.source[idx_a] as i64 - step.source[idx_b] as i64;
-                    let (flow, suppress_b) = resolve_pair(&mut step.delta_overrides, check_override, idx_a, idx_b, gradient, conductivity, divisor, &mut remainder_acc);
-                    apply_pair(&mut step.target, idx_a, idx_b, flow, suppress_b);
+                    let flow = resolve_pair(
+                        &mut step.delta_overrides,
+                        check_override,
+                        idx_a,
+                        idx_b,
+                        gradient,
+                        conductivity,
+                        divisor,
+                        &mut remainder_acc,
+                    );
+                    apply_pair(&mut step.target, idx_a, idx_b, flow);
                 } else {
                     let flow = compute_flow(0, conductivity, divisor, &mut remainder_acc);
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
@@ -207,8 +216,17 @@ pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
                 if y + 1 < step.height {
                     let idx_b = field_index(step, x, y + 1, z);
                     let gradient = step.source[idx_a] as i64 - step.source[idx_b] as i64;
-                    let (flow, suppress_b) = resolve_pair(&mut step.delta_overrides, check_override, idx_a, idx_b, gradient, conductivity, divisor, &mut remainder_acc);
-                    apply_pair(&mut step.target, idx_a, idx_b, flow, suppress_b);
+                    let flow = resolve_pair(
+                        &mut step.delta_overrides,
+                        check_override,
+                        idx_a,
+                        idx_b,
+                        gradient,
+                        conductivity,
+                        divisor,
+                        &mut remainder_acc,
+                    );
+                    apply_pair(&mut step.target, idx_a, idx_b, flow);
                 } else {
                     let flow = compute_flow(0, conductivity, divisor, &mut remainder_acc);
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
@@ -218,8 +236,17 @@ pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
                 if z + 1 < step.depth {
                     let idx_b = field_index(step, x, y, z + 1);
                     let gradient = step.source[idx_a] as i64 - step.source[idx_b] as i64;
-                    let (flow, suppress_b) = resolve_pair(&mut step.delta_overrides, check_override, idx_a, idx_b, gradient, conductivity, divisor, &mut remainder_acc);
-                    apply_pair(&mut step.target, idx_a, idx_b, flow, suppress_b);
+                    let flow = resolve_pair(
+                        &mut step.delta_overrides,
+                        check_override,
+                        idx_a,
+                        idx_b,
+                        gradient,
+                        conductivity,
+                        divisor,
+                        &mut remainder_acc,
+                    );
+                    apply_pair(&mut step.target, idx_a, idx_b, flow);
                 } else {
                     let flow = compute_flow(0, conductivity, divisor, &mut remainder_acc);
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
@@ -229,28 +256,14 @@ pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
     }
 }
 
-/// Process all Portal entries in the override map.
-/// Portal pairs are non-spatial (boundary-spanning or otherwise non-adjacent),
-/// so the tile pass never encounters them. This pass runs after all tiles complete,
-/// reading from the frozen source snapshot and writing to the target buffer.
-pub fn process_portal_overrides(step: &mut IncrementalStep) {
-    let shift = step.diffusion_rate as u32;
-    let conductivity = 65535i64;
-    let divisor = (7i64 << shift) << 16;
-    let mut remainder_acc = 0i64;
-
-    for (&(idx_a, idx_b), kind) in step.delta_overrides.iter() {
-        if matches!(kind, DeltaKind::Portal) {
-            let gradient = step.source[idx_a] as i64 - step.source[idx_b] as i64;
-            let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-            apply_pair(&mut step.target, idx_a, idx_b, flow, false);
-        }
-    }
-}
-
-/// Process all ContractList entries after the tile pass.
-/// Currently handles Buffered contracts; other kinds will be added as implemented.
-pub fn process_contract_list(source: &[u32], target: &mut [u32], contract_list: &mut ContractList, diffusion_rate: u8) {
+/// Process all ContractList entries after the tile pass, using the frozen source snapshot.
+/// Handles Portal, Void, and (stubs for) Remote and Entity.
+pub fn process_contract_list(
+    source: &[u32],
+    target: &mut [u32],
+    contract_list: &mut ContractList,
+    diffusion_rate: u8,
+) {
     let shift = diffusion_rate as u32;
     let conductivity = 65535i64;
     let divisor = (7i64 << shift) << 16;
@@ -258,19 +271,32 @@ pub fn process_contract_list(source: &[u32], target: &mut [u32], contract_list: 
 
     for contract in &mut contract_list.contracts {
         match &mut contract.kind {
-            ContractKind::Buffered { accumulated, drain_every, ticks } => {
-                let gradient = source[contract.src_a as usize] as i64 - source[contract.src_b as usize] as i64;
+            ContractKind::Portal => {
+                let gradient =
+                    source[contract.src_a as usize] as i64 - source[contract.src_b as usize] as i64;
                 let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-                *accumulated += flow;
-                *ticks += 1;
-                if *ticks >= *drain_every {
-                    let drained = *accumulated;
-                    *accumulated = 0;
-                    *ticks = 0;
-                    apply_pair(target, contract.dst_a as usize, contract.dst_b as usize, drained, false);
-                }
+                apply_pair(
+                    target,
+                    contract.src_a as usize,
+                    contract.src_b as usize,
+                    flow,
+                );
             }
-            _ => {}
+            ContractKind::Void { consumed } => {
+                // Virtual neighbor is bottomless vacuum (value = 0).
+                let gradient = source[contract.src_a as usize] as i64;
+                let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
+                *consumed += flow;
+                target[contract.dst_a as usize] =
+                    ((target[contract.dst_a as usize] as i64) - flow) as u32;
+                // No write to dst_b: mass exits the simulation.
+                // Reset remainder to prevent this large sink from contaminating
+                // subsequent entries in the same pass.
+                remainder_acc = 0;
+            }
+            ContractKind::Remote | ContractKind::Entity => {
+                // Not yet implemented.
+            }
         }
     }
 }

@@ -1,57 +1,63 @@
 //! Delta contract abstraction for cell-pair flow computation.
 //!
-//! `DeltaKind` is the Phase 8B hybrid enum. The modal fast path — used for
-//! 99.99% of pairs — bypasses this enum entirely. Only pairs registered in
-//! `DeltaOverrides` reach here.
+//! Two separate enums govern the two processing paths:
 //!
-//! # Contract taxonomy (with ONI analogues)
+//! ## `DeltaKind` — spatial pair overrides (tile pass)
 //!
-//! - `Modal`  — normal diffusion. The common case; registered overrides may be
-//!   Modal to allow future wrapping without touching the hot path.
+//! Overrides the behavior of a pair the tile pass encounters during its
+//! 3-per-voxel sweep: (x,y,z)↔(x+1,y,z), etc. Both endpoints are real
+//! in-grid cells at the time the override fires. Stored in `DeltaOverrides`.
 //!
-//! - `Mirror` — perfectly insulating boundary. No substance crosses the pair
-//!   regardless of gradient. ONI analogue: **neutronium**, the unobtainable
-//!   map-edge tile that hard-walls all heat and mass transfer.
+//! - `Modal`    — normal gradient diffusion. Explicit override that behaves
+//!                identically to the implicit fast path; useful for wrapping.
+//! - `Logged`   — Modal + records each flow value for diagnostics.
+//! - `Mirror`   — zero flow, perfect insulation (neutronium, map edges).
+//! - `Buffered` — accumulates flow across fast ticks, drains on the Nth tick.
+//!                Models the interface between two simulation regions ticking
+//!                at different rates or different phases.
 //!
-//! - `Void`   — mass sink. Substance flows out of the owner and disappears;
-//!   the neighbor index is a phantom that never receives anything. Conservation
-//!   is intentionally violated. ONI analogue: **space** — a tile open to vacuum
-//!   beyond the asteroid boundary. Gas/liquid that reaches a space-adjacent cell
-//!   exits the simulation permanently.
+//! ## `ContractKind` — non-spatial extra edges (ContractList post-pass)
 //!
-//! - `Remote` (future) — cross-server portal. Like `Void`, the neighbor index
-//!   is not a local cell — it lives on a different game server in a Clusterio
-//!   cluster. The flow is serialized and forwarded over the network; the remote
-//!   server applies the matching inbound delta to its local cell. From each
-//!   server's perspective the pair looks like a Void until the network ACK arrives.
+//! Extra graph edges that the tile pass never encounters. At least one endpoint
+//! is not the implicit spatial neighbor: it may be non-adjacent, virtual, or
+//! external. Stored in `ContractList`.
+//!
+//! - `Portal`  — symmetric coupling between two non-adjacent in-grid cells
+//!               (e.g. opposite faces of a torus). Both endpoints are local
+//!               indices but are not spatial neighbors.
+//! - `Void`    — directed sink. One real endpoint; other side is bottomless
+//!               vacuum (virtual 0). Mass is subtracted from the owner and
+//!               destroyed. `consumed` accumulates total flow for diagnostics.
+//!               Related: `Infinity` (TODO) — like Void but the virtual side
+//!               holds a configurable value (Factorio infinity pipe analogue).
+//! - `Remote`  — symmetric coupling across servers (Clusterio). Like Portal
+//!               but one endpoint lives on a different game server; resolved
+//!               async via ghost-cell sync.
+//! - `Entity`  — one endpoint is a Luanti entity (Lua object reference). The
+//!               entity applies homeostasis resistance rather than passive
+//!               diffusion; it ticks at the Lua entity rate.
 
-/// Per-pair flow contract. `Modal` is the degenerate case (same as inline
-/// `compute_flow`). Non-modal variants are sparse and looked up only when
-/// `cell_has_override` flags the owner cell, keeping the hot path branchless.
-pub enum DeltaKind {
+/// Spatial pair override. Applied by the tile pass when it encounters the pair.
+/// Both endpoints are real in-grid cells.
+pub enum NeighborKind {
     /// Gradient diffusion identical to the inline fast path.
     Modal,
     /// Same as Modal but records each flow value for diagnostics.
     Logged { log: Vec<i64> },
-    /// Perfectly insulating boundary — zero flow regardless of gradient.
-    /// Use for map-edge tiles that must never exchange substance (neutronium).
+    /// Zero flow — perfect insulation regardless of gradient.
     Mirror,
-    /// Mass sink — owner loses substance, neighbor receives nothing.
-    /// `consumed` accumulates total flow drained, analogous to `Logged::log`.
-    /// Use for cells adjacent to out-of-bounds vacuum (open space, hull breach).
-    Void { consumed: i64 },
-    /// Symmetric coupling to a non-adjacent cell in the same grid (portal mouth).
-    /// Flow is computed and applied to both sides just like Modal; the kernel
-    /// uses the two endpoint indices directly rather than the implicit spatial neighbor.
-    Portal,
-    // Remote: portal to a field on another game server (Clusterio). Like Void,
-    // the neighbor index is non-local; the flow is forwarded over the network.
-    // Needs async accumulation design before implementation.
+    /// Accumulates flow across `drain_every` fast ticks, then drains in bulk.
+    /// Returns 0 each non-drain tick so no mass moves until the drain fires.
+    Buffered {
+        accumulated: i64,
+        drain_every: u32,
+        ticks: u32,
+    },
 }
 
-impl DeltaKind {
-    // Compute and record the flow for this pair. `compute_fn` is the modal
-    // formula; all variants call it so logged flows are directly comparable.
+impl NeighborKind {
+    /// Compute (and optionally record/accumulate) the flow for this pair.
+    /// `compute_fn` is the modal formula; all variants call it for comparability.
     pub fn apply(
         &mut self,
         gradient: i64,
@@ -62,78 +68,64 @@ impl DeltaKind {
     ) -> i64 {
         let flow = compute_fn(gradient, conductivity, divisor, remainder_acc);
         match self {
-            DeltaKind::Modal => flow,
-            DeltaKind::Logged { log } => {
+            NeighborKind::Modal => flow,
+            NeighborKind::Logged { log } => {
                 log.push(flow);
                 flow
             }
-            // Zero flow: neutronium-style perfect insulation.
-            DeltaKind::Mirror => 0,
-            DeltaKind::Void { consumed } => {
-                *consumed += flow;
-                flow
+            NeighborKind::Mirror => 0,
+            NeighborKind::Buffered {
+                accumulated,
+                drain_every,
+                ticks,
+            } => {
+                *accumulated += flow;
+                *ticks += 1;
+                if *ticks >= *drain_every {
+                    let drained = *accumulated;
+                    *accumulated = 0;
+                    *ticks = 0;
+                    drained
+                } else {
+                    0
+                }
             }
-            // Symmetric coupling to a non-adjacent cell; same as Modal from apply()'s perspective.
-            // The kernel must use the correct endpoint indices rather than the implicit neighbor.
-            DeltaKind::Portal => flow,
         }
     }
 
     pub fn new_logged() -> Self {
-        DeltaKind::Logged { log: Vec::new() }
+        NeighborKind::Logged { log: Vec::new() }
     }
 
     pub fn log(&self) -> Option<&[i64]> {
         match self {
-            DeltaKind::Logged { log } => Some(log),
+            NeighborKind::Logged { log } => Some(log),
             _ => None,
         }
     }
 }
 
-/// Sparse map from cell-pair `(owner_idx, neighbor_idx)` to a contract.
-/// The owner index is always the lower-xyz cell of the pair (owner-writes-positive scheme).
-/// The neighbor index for `Void` and `Remote` pairs may be out of bounds or fictional.
-pub type DeltaOverrides = std::collections::HashMap<(usize, usize), DeltaKind>;
+/// Sparse map from spatial cell-pair `(owner_idx, neighbor_idx)` to a DeltaKind override.
+/// The owner is the lower-xyz cell (owner-writes-positive scheme).
+pub type NeighborOverrides = std::collections::HashMap<(usize, usize), NeighborKind>;
 
 // ---------------------------------------------------------------------------
-// Flat contract list (replaces DeltaOverrides long-term)
+// ContractList — non-spatial extra edges
 // ---------------------------------------------------------------------------
 //
-// A contract is a graph edge: two endpoints, a flow computation, and write
-// targets. The 3-per-voxel spatial loop is the implicit regular graph; this
-// list holds only the extra edges that fall outside it (mirror faces, portals,
-// hull breaches, entity exchanges, cross-server links).
+// A contract is a graph edge beyond the 3-per-voxel implicit spatial loop.
+// Processed after the tile pass, reading from the frozen source snapshot.
 //
-// Memory layout by topology:
+// Memory layout: Contract entries are fixed-size for cache-friendly iteration.
+// `src_b` and `dst_b` interpretation is kind-driven:
 //
-//   Local (Modal, Mirror, Buffered, Void, Portal): both endpoints are u32
-//   voxel indices in this field. Void's B-side read is virtual const-0
-//   (bottomless vacuum); its B-side write is discarded. Portal's endpoints
-//   are also plain u32 indices — topologically non-adjacent but in the same
-//   address space, so no extra storage.
-//
-//   Non-local (Remote, Entity): one endpoint requires extra data that doesn't
-//   fit in a u32. Remote needs a server ID, a remote voxel index, a cached
-//   ghost value, and an accumulator (~20 bytes). Entity needs an opaque Lua
-//   object reference (8 bytes). These store a u32 `aux_idx` in src_b/dst_b
-//   pointing into the appropriate side table (remote_endpoints or
-//   entity_handles). The Contract entry itself stays fixed-size for every
-//   kind, keeping the hot loop uniform-width and cache-friendly.
-//
-// ContractKind drives interpretation of src_b/dst_b:
-//   Modal / Mirror / Portal / Buffered  →  local voxel index
-//   Void / Infinity                     →  src_b unused (read 0); dst_b unused (discard)
-//   Remote / Entity                     →  aux_idx into side table
-
-/* TODO: `Infinity` is like Void but
-the contract stores a snapshot of a tile which can source or sink flow but
-resets to a value configured in the in-game creative mode gui (instead of
-always being vacuum). Like the infinity pipe in Factorio 1.1 */
+//   Portal          → local voxel index (non-adjacent but in same grid)
+//   Void            → unused (B-side read is virtual 0; B-side write discarded)
+//   Remote / Entity → aux_idx into the appropriate side table below
 
 /// Side-table entry for Remote contracts.
 pub struct RemoteEndpoint {
-    pub server_id: u32, //might become an ipv6 address
+    pub server_id: u32,
     pub remote_voxel: u32,
     /// Last-known value of the remote cell (ghost cell, updated each network sync).
     pub cached_value: u32,
@@ -147,10 +139,8 @@ pub struct EntityHandle {
     pub lua_ref: u64,
 }
 
-/// A single non-spatial graph edge in the contract list.
-///
-/// All fields are fixed-size. `src_b` and `dst_b` are plain `u32` whose
-/// meaning is kind-driven — see the module comment above.
+/// A single non-spatial graph edge.
+/// All fields are fixed-size; `src_b`/`dst_b` meaning is kind-driven.
 pub struct Contract {
     pub src_a: u32,
     pub src_b: u32,
@@ -159,37 +149,24 @@ pub struct Contract {
     pub kind: ContractKind,
 }
 
+/// Non-spatial extra edge kind. Processed by the ContractList post-pass.
 pub enum ContractKind {
-    /// Normal gradient diffusion, symmetric. Equivalent to the implicit spatial loop.
-    Modal,
-    /// Zero flow, insulating boundary (neutronium, map edges).
-    Mirror,
-    /// Symmetric coupling to a non-adjacent cell in the same grid (portal mouth).
+    /// Symmetric coupling between two non-adjacent in-grid cells.
     Portal,
-    /// Directed mass sink. B-side read is virtual 0; B-side write is discarded.
-    Void,
-    /// Same formula as Modal but accumulates across fast ticks, drains on slow-chunk tick.
-    /// `drain_every`: how many fast ticks between drains. `ticks`: counter since last drain.
-    Buffered {
-        accumulated: i64,
-        drain_every: u32,
-        ticks: u32,
-    },
+    /// Directed sink to bottomless vacuum. `consumed` tracks total flow drained.
+    Void { consumed: i64 },
     /// Cross-server symmetric coupling. src_b/dst_b index into `remote_endpoints`.
-    /// Async: flow accumulates until the next network sync.
     Remote,
     /// One endpoint is a Luanti entity. src_b/dst_b index into `entity_handles`.
-    /// Entity applies homeostasis resistance rather than passive diffusion;
-    /// it ticks at the Lua entity rate, not the voxel rate.
     Entity,
 }
 
 /// Flat list of non-spatial contracts for a field region.
 pub struct ContractList {
     pub contracts: Vec<Contract>,
-    /// Side table for Remote contracts; indexed by Contract::src_b / dst_b.
+    /// Side table for Remote contracts.
     pub remote_endpoints: Vec<RemoteEndpoint>,
-    /// Side table for Entity contracts; indexed by Contract::src_b / dst_b.
+    /// Side table for Entity contracts.
     pub entity_handles: Vec<EntityHandle>,
 }
 

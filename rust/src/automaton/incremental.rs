@@ -6,11 +6,10 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::automaton::delta::{ContractList, DeltaOverrides};
+use crate::automaton::delta::{ContractList, NeighborOverrides};
 use crate::automaton::field::{create_field, Field};
 use crate::automaton::kernel::{
-    build_tile_queue, process_contract_list, process_portal_overrides, process_tile,
-    IncrementalStep, TILE_SIZE,
+    build_tile_queue, process_contract_list, process_tile, IncrementalStep, TILE_SIZE,
 };
 
 /// Manages the lifecycle of incremental steps for a Field.
@@ -26,7 +25,7 @@ pub struct StepController {
 
     /// Persistent delta overrides. Moved into IncrementalStep on begin_step,
     /// returned here on finalize_step (with updated log entries, etc.).
-    pub delta_overrides: DeltaOverrides,
+    pub delta_overrides: NeighborOverrides,
 
     /// Flat contract list (extra graph edges beyond the 3-per-voxel spatial loop).
     pub contract_list: ContractList,
@@ -55,7 +54,7 @@ impl StepController {
             field,
             active_step: None,
             thread_pool,
-            delta_overrides: DeltaOverrides::default(),
+            delta_overrides: NeighborOverrides::default(),
             contract_list: ContractList::new(),
         }
     }
@@ -81,7 +80,7 @@ impl StepController {
             field,
             active_step: None,
             thread_pool,
-            delta_overrides: DeltaOverrides::default(),
+            delta_overrides: NeighborOverrides::default(),
             contract_list: ContractList::new(),
         }
     }
@@ -177,7 +176,6 @@ impl StepController {
 
     fn finalize_step(&mut self) {
         if let Some(mut step) = self.active_step.take() {
-            process_portal_overrides(&mut step);
             process_contract_list(
                 &step.source,
                 &mut step.target,
@@ -666,7 +664,7 @@ mod tests {
     /// Phase 8B: Logged pairs record flows identical to the modal formula.
     #[test]
     fn test_logged_delta_matches_modal() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         let mut ctrl = StepController::new(4, 4, 4, 0, 1);
 
@@ -684,8 +682,10 @@ mod tests {
         let pair_x = (idx(0, 0, 0), idx(1, 0, 0));
         let pair_y = (idx(0, 1, 0), idx(0, 2, 0));
 
-        ctrl.delta_overrides.insert(pair_x, DeltaKind::new_logged());
-        ctrl.delta_overrides.insert(pair_y, DeltaKind::new_logged());
+        ctrl.delta_overrides
+            .insert(pair_x, NeighborKind::new_logged());
+        ctrl.delta_overrides
+            .insert(pair_y, NeighborKind::new_logged());
 
         ctrl.step_blocking();
 
@@ -693,7 +693,7 @@ mod tests {
         let conductivity = 65535i64;
         let divisor = (7i64 << shift) << 16;
 
-        let check_logged = |kind: &DeltaKind, expected_gradient: i64| {
+        let check_logged = |kind: &NeighborKind, expected_gradient: i64| {
             let log = kind.log().expect("should be Logged variant");
             assert!(!log.is_empty(), "log should have at least one entry");
             let mut acc = 0i64;
@@ -722,7 +722,7 @@ mod tests {
     /// Mass conservation must still hold (neither cell changes due to that pair).
     #[test]
     fn test_mirror_delta_blocks_flow() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         // 4×4×4, diffusion_rate=0 for predictable divisor.
         // reminder that diffusion rate is inversely proportional to actual flow rate.
@@ -738,7 +738,8 @@ mod tests {
         let before_a = ctrl.field.cells[i_a];
         let before_b = ctrl.field.cells[i_b];
 
-        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
+        ctrl.delta_overrides
+            .insert((i_a, i_b), NeighborKind::Mirror);
         ctrl.step_blocking();
 
         let after_a = ctrl.field.cells[i_a];
@@ -770,7 +771,7 @@ mod tests {
     /// Phase 8B: Mirror override — mass conservation holds across the whole field.
     #[test]
     fn test_mirror_delta_conserves_mass() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         let mut ctrl = StepController::new(8, 8, 8, 1, 1);
         let w = ctrl.field.width;
@@ -783,7 +784,8 @@ mod tests {
 
         let i_a = idx(w, h, 2, 2, 2);
         let i_b = idx(w, h, 3, 2, 2);
-        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
+        ctrl.delta_overrides
+            .insert((i_a, i_b), NeighborKind::Mirror);
 
         let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
         // for loop does several steps
@@ -801,26 +803,36 @@ mod tests {
 
     /// Phase 8B: Void override — consumed accumulator accounts for all missing mass.
     ///
-    /// `Void { consumed }` records flow drained each step, like a production quota
-    /// counter. After N steps, `consumed` must equal the total mass removed from
-    /// the field. This holds regardless of grid size, step count, or which other
-    /// cells mass diffused through before reaching the sink.
+    /// Void is a ContractList entry (non-spatial extra edge). The spatial pair on
+    /// the breach face is set to Mirror so no direct modal flow occurs; the Void
+    /// contract drains mass to virtual vacuum. `consumed` must equal total mass lost.
     #[test]
     fn test_void_delta_is_mass_sink() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::{Contract, ContractKind, NeighborKind};
 
         let mut ctrl = StepController::new(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
         let i_a = idx(w, h, 0, 0, 0);
-        let i_b = idx(w, h, 1, 0, 0);
-        ctrl.field.cells[i_a] = 1_000_000;
+        let i_b = idx(w, h, 1, 0, 0); // spatial neighbor on the breach face
 
+        ctrl.field.cells[i_a] = 1_000_000;
         let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
 
+        // Mirror the spatial pair so no modal flow crosses to i_b.
         ctrl.delta_overrides
-            .insert((i_a, i_b), DeltaKind::Void { consumed: 0 });
+            .insert((i_a, i_b), NeighborKind::Mirror);
+
+        // Void contract drains i_a to virtual vacuum.
+        ctrl.contract_list.contracts.push(Contract {
+            src_a: i_a as u32,
+            src_b: 0, // unused: virtual neighbor is always 0
+            dst_a: i_a as u32,
+            dst_b: 0, // unused: no write target
+            kind: ContractKind::Void { consumed: 0 },
+        });
+
         for _ in 0..16 {
             ctrl.step_blocking();
         }
@@ -828,15 +840,12 @@ mod tests {
         let mass_after: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
         let mass_lost = mass_before - mass_after;
 
-        let consumed = match ctrl.delta_overrides.get(&(i_a, i_b)).unwrap() {
-            DeltaKind::Void { consumed } => *consumed as u64,
+        let consumed = match &ctrl.contract_list.contracts[0].kind {
+            ContractKind::Void { consumed } => *consumed as u64,
             _ => panic!("expected Void"),
         };
 
-        assert!(
-            consumed > 0,
-            "Void: no flow was recorded (sink never activated)"
-        );
+        assert!(consumed > 0, "Void: sink never activated");
         assert_eq!(
             consumed, mass_lost,
             "Void: consumed ({}) must equal mass removed from field ({})",
@@ -847,7 +856,7 @@ mod tests {
     /// Phase 8B: Modal override produces identical output to no override.
     #[test]
     fn test_modal_override_matches_baseline() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         // Baseline: no overrides.
         let mut baseline = StepController::new(4, 4, 4, 0, 1);
@@ -866,7 +875,7 @@ mod tests {
         let i_b = idx(w, h, 1, 0, 0);
         with_modal
             .delta_overrides
-            .insert((i_a, i_b), DeltaKind::Modal);
+            .insert((i_a, i_b), NeighborKind::Modal);
         with_modal.step_blocking();
 
         assert_eq!(
@@ -878,7 +887,7 @@ mod tests {
     /// Phase 8B: Logged delta accumulates one entry per step across multiple generations.
     #[test]
     fn test_logged_delta_accumulates_across_steps() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         let mut ctrl = StepController::new(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
@@ -890,7 +899,7 @@ mod tests {
         ctrl.field.cells[i_b] = 1_000;
 
         ctrl.delta_overrides
-            .insert((i_a, i_b), DeltaKind::new_logged());
+            .insert((i_a, i_b), NeighborKind::new_logged());
 
         let n_steps = 5;
         for _ in 0..n_steps {
@@ -915,7 +924,7 @@ mod tests {
     /// Phase 8B: cell_has_override flag is set for owner cells, clear for all others.
     #[test]
     fn test_cell_has_override_flag_population() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         let mut ctrl = StepController::new(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
@@ -927,9 +936,9 @@ mod tests {
         let i_nbr2 = idx(w, h, 2, 2, 0);
 
         ctrl.delta_overrides
-            .insert((i_owner1, i_nbr1), DeltaKind::Modal);
+            .insert((i_owner1, i_nbr1), NeighborKind::Modal);
         ctrl.delta_overrides
-            .insert((i_owner2, i_nbr2), DeltaKind::Modal);
+            .insert((i_owner2, i_nbr2), NeighborKind::Modal);
 
         // begin_step populates cell_has_override; we inspect before any tile runs.
         ctrl.begin_step().expect("begin_step must succeed");
@@ -975,7 +984,7 @@ mod tests {
     /// Phase 8B: override added after begin_step takes effect next generation, not current.
     #[test]
     fn test_override_added_mid_run_deferred() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         let mut ctrl = StepController::new(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
@@ -988,7 +997,8 @@ mod tests {
 
         // Begin a step with no overrides, then insert one before it finishes.
         ctrl.begin_step().expect("begin_step must succeed");
-        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
+        ctrl.delta_overrides
+            .insert((i_a, i_b), NeighborKind::Mirror);
 
         // Complete the in-progress step (Mirror was added after begin, so this
         // step runs without the mirror — flow should have occurred).
@@ -1019,7 +1029,7 @@ mod tests {
     /// Phase 8B: override on a pair that straddles a tile boundary fires correctly.
     #[test]
     fn test_override_across_tile_boundary() {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::NeighborKind;
 
         // 32×16×16: tiles split at x=16, so (15, 0, 0)→(16, 0, 0) is a boundary pair.
         let mut ctrl = StepController::new(32, 16, 16, 0, 1);
@@ -1033,7 +1043,7 @@ mod tests {
         ctrl.field.cells[i_b] = 1;
 
         ctrl.delta_overrides
-            .insert((i_a, i_b), DeltaKind::new_logged());
+            .insert((i_a, i_b), NeighborKind::new_logged());
         ctrl.step_blocking();
 
         let log = ctrl
@@ -1125,14 +1135,11 @@ mod tests {
     }
 
     /// Register Portal contracts to wrap all 6 boundary face-pairs on a cube,
-    /// turning the field into a 3-torus. Adds Mirror on each spatial boundary
-    /// pair and a Portal extra-contract linking the opposing face.
-    ///
-    /// This function uses DeltaOverrides (the current mechanism) as a stand-in
-    /// until ContractList processing is wired into the kernel. The Portal kind
-    /// will be migrated to ContractList when the kernel supports it.
+    /// turning the field into a 3-torus. Each boundary face gets a Mirror spatial
+    /// override (so no flow exits the grid edge) plus a Portal ContractList entry
+    /// coupling the opposing face.
     fn register_3torus_portals(ctrl: &mut StepController) {
-        use crate::automaton::delta::DeltaKind;
+        use crate::automaton::delta::{Contract, ContractKind, NeighborKind};
         let w = ctrl.field.width;
         let h = ctrl.field.height;
         let d = ctrl.field.depth;
@@ -1143,7 +1150,14 @@ mod tests {
                 let i_last = idx(w, h, w - 1, y, z);
                 let i_wrap = idx(w, h, 0, y, z);
                 ctrl.delta_overrides
-                    .insert((i_last, i_wrap), DeltaKind::Portal);
+                    .insert((i_last, i_wrap), NeighborKind::Mirror);
+                ctrl.contract_list.contracts.push(Contract {
+                    src_a: i_last as u32,
+                    src_b: i_wrap as u32,
+                    dst_a: i_last as u32,
+                    dst_b: i_wrap as u32,
+                    kind: ContractKind::Portal,
+                });
             }
         }
         // Y axis: connect y=H-1 to y=0 for every (x, z).
@@ -1152,7 +1166,14 @@ mod tests {
                 let i_last = idx(w, h, x, h - 1, z);
                 let i_wrap = idx(w, h, x, 0, z);
                 ctrl.delta_overrides
-                    .insert((i_last, i_wrap), DeltaKind::Portal);
+                    .insert((i_last, i_wrap), NeighborKind::Mirror);
+                ctrl.contract_list.contracts.push(Contract {
+                    src_a: i_last as u32,
+                    src_b: i_wrap as u32,
+                    dst_a: i_last as u32,
+                    dst_b: i_wrap as u32,
+                    kind: ContractKind::Portal,
+                });
             }
         }
         // Z axis: connect z=D-1 to z=0 for every (x, y).
@@ -1161,7 +1182,14 @@ mod tests {
                 let i_last = idx(w, h, x, y, d - 1);
                 let i_wrap = idx(w, h, x, y, 0);
                 ctrl.delta_overrides
-                    .insert((i_last, i_wrap), DeltaKind::Portal);
+                    .insert((i_last, i_wrap), NeighborKind::Mirror);
+                ctrl.contract_list.contracts.push(Contract {
+                    src_a: i_last as u32,
+                    src_b: i_wrap as u32,
+                    dst_a: i_last as u32,
+                    dst_b: i_wrap as u32,
+                    kind: ContractKind::Portal,
+                });
             }
         }
     }
@@ -1174,7 +1202,6 @@ mod tests {
     /// align and checked for fuzzy congruence (noise < 0.3 units/cell/step).
     #[test]
     fn test_portal_3torus_congruence() {
-        use crate::automaton::delta::DeltaKind;
         let (w, h, d) = (32i16, 32i16, 32i16);
         let steps = 20u32;
         let blob_mass = 1_000_000u32;
@@ -1211,15 +1238,16 @@ mod tests {
 
     /// Phase 8B+: Buffered — cross-rate-boundary accumulation.
     ///
-    /// Two adjacent cells: A ticks every step (fast), B is only updated by a
-    /// Buffered contract that drains every `drain_every` steps (slow). After
-    /// `drain_every` fast steps the Buffered contract fires once, transferring
-    /// the accumulated flow to B. Checks: (1) B is unchanged until drain tick,
-    /// (2) after drain, A+B mass equals the original total, (3) flow direction
-    /// matches gradient (mass moves from high to low).
+    /// Buffered is a DeltaKind (spatial pair override). The pair accumulates flow
+    /// each step but applies nothing until the drain tick. A small gradient is used
+    /// so the remainder_acc contamination from i_a's other pairs doesn't reach i_b
+    /// via stochastic rounding within the same tile.
+    ///
+    /// Checks: (1) B is unchanged until drain tick, (2) B gains mass after drain,
+    /// (3) global mass is conserved (Buffered is symmetric).
     #[test]
     fn test_buffered_drains_on_slow_tick() {
-        use crate::automaton::delta::{Contract, ContractKind, ContractList, DeltaKind};
+        use crate::automaton::delta::NeighborKind;
 
         let (w, h, d) = (8i16, 8i16, 8i16);
         let drain_every = 4u32;
@@ -1227,30 +1255,23 @@ mod tests {
         let i_b = idx(w, h, 1, 0, 0);
 
         let mut ctrl = StepController::new(w, h, d, 3, 1);
-        // Large gradient: A has mass, B is at floor.
-        ctrl.field.cells[i_a] = 100_000;
+        // Small gradient: keeps remainder_acc contamination below the firing threshold
+        // for i_b's own zero-gradient pairs in the same tile.
+        ctrl.field.cells[i_a] = 100;
         ctrl.field.cells[i_b] = 1;
 
         let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
         let b_before = ctrl.field.cells[i_b];
 
-        // Suppress the normal spatial flow on (i_a, i_b): the Buffered contract in
-        // ContractList is the sole channel between them. Without this Mirror the tile
-        // pass would apply modal diffusion each step, defeating the drain-every logic.
-        ctrl.delta_overrides.insert((i_a, i_b), DeltaKind::Mirror);
-
-        // Register a Buffered contract between i_a and i_b.
-        ctrl.contract_list.contracts.push(Contract {
-            src_a: i_a as u32,
-            src_b: i_b as u32,
-            dst_a: i_a as u32,
-            dst_b: i_b as u32,
-            kind: ContractKind::Buffered {
+        // Buffered is the spatial pair override — it IS the contract on this face.
+        ctrl.delta_overrides.insert(
+            (i_a, i_b),
+            NeighborKind::Buffered {
                 accumulated: 0,
                 drain_every,
                 ticks: 0,
             },
-        });
+        );
 
         // Run (drain_every - 1) steps: B must not have changed from the Buffered contract.
         for _ in 0..(drain_every - 1) {
