@@ -853,6 +853,76 @@ mod tests {
         );
     }
 
+    /// Infinity contract: cell draining toward a lower target (sink mode) and
+    /// a separate cell filling toward a higher target (source mode). In both cases
+    /// `consumed` must account for all mass that crossed the boundary.
+    #[test]
+    fn test_infinity_delta_sink_and_source() {
+        use crate::automaton::delta::{Contract, ContractKind, NeighborKind};
+
+        // --- sink mode: cell above target loses mass --------------------------------
+        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let w = ctrl.field.width;
+        let h = ctrl.field.height;
+        let i_a = idx(w, h, 0, 0, 0);
+        let i_b = idx(w, h, 1, 0, 0);
+
+        ctrl.field.cells[i_a] = 1_000_000;
+        let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+
+        ctrl.delta_overrides.insert((i_a, i_b), NeighborKind::Mirror);
+        ctrl.contract_list.contracts.push(Contract {
+            src_a: i_a as u32, src_b: 0,
+            dst_a: i_a as u32, dst_b: 0,
+            kind: ContractKind::Infinity { target_value: 0, consumed: 0 },
+        });
+
+        for _ in 0..16 {
+            ctrl.step_blocking();
+        }
+
+        let mass_after: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+        let mass_lost = mass_before - mass_after;
+        let consumed = match &ctrl.contract_list.contracts[0].kind {
+            ContractKind::Infinity { consumed, .. } => *consumed as u64,
+            _ => panic!("expected Infinity"),
+        };
+        assert!(consumed > 0, "Infinity sink: never activated");
+        assert_eq!(consumed, mass_lost,
+            "Infinity sink: consumed ({}) must equal mass removed ({})", consumed, mass_lost);
+
+        // --- source mode: cell below target gains mass ------------------------------
+        let mut ctrl2 = StepController::new(4, 4, 4, 0, 1);
+        let target_value: u32 = 500_000;
+        let i_c = idx(w, h, 0, 0, 0);
+        let i_d = idx(w, h, 1, 0, 0);
+
+        ctrl2.field.cells[i_c] = 0;
+        let mass_before2: u64 = ctrl2.field.cells.iter().map(|&v| v as u64).sum();
+
+        ctrl2.delta_overrides.insert((i_c, i_d), NeighborKind::Mirror);
+        ctrl2.contract_list.contracts.push(Contract {
+            src_a: i_c as u32, src_b: 0,
+            dst_a: i_c as u32, dst_b: 0,
+            kind: ContractKind::Infinity { target_value, consumed: 0 },
+        });
+
+        for _ in 0..16 {
+            ctrl2.step_blocking();
+        }
+
+        let mass_after2: u64 = ctrl2.field.cells.iter().map(|&v| v as u64).sum();
+        let mass_gained = mass_after2 - mass_before2;
+        let consumed2 = match &ctrl2.contract_list.contracts[0].kind {
+            ContractKind::Infinity { consumed, .. } => *consumed,
+            _ => panic!("expected Infinity"),
+        };
+        assert!(mass_gained > 0, "Infinity source: cell never filled");
+        // consumed is negative when mass flows into the cell (gradient is negative)
+        assert_eq!((-consumed2) as u64, mass_gained,
+            "Infinity source: |consumed| ({}) must equal mass gained ({})", -consumed2, mass_gained);
+    }
+
     /// Phase 8B: Modal override produces identical output to no override.
     #[test]
     fn test_modal_override_matches_baseline() {

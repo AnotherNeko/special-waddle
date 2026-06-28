@@ -153,8 +153,15 @@ pub struct Contract {
 pub enum ContractKind {
     /// Symmetric coupling between two non-adjacent in-grid cells.
     Portal,
-    /// Directed sink to bottomless vacuum. `consumed` tracks total flow drained.
+    /// Directed sink to bottomless vacuum (virtual neighbor = 0). `consumed` tracks total flow.
+    /// Equivalent to `Infinity { target_value: 0 }` but kept as a named primitive.
     Void { consumed: i64 },
+    /// One real endpoint coupled to a virtual neighbor held at a configurable value.
+    /// Acts as a source when `target_value > cell`, sink when `target_value < cell`.
+    /// This is the Factorio "infinity pipe" analogue and the implementation template for
+    /// `Remote` (virtual value = cached remote cell) and `Entity` (virtual value from Lua).
+    /// In-game this will eventually be replaced by an Infinity Node entity with a GUI.
+    Infinity { target_value: u32, consumed: i64 },
     /// Cross-server symmetric coupling. src_b/dst_b index into `remote_endpoints`.
     Remote,
     /// One endpoint is a Luanti entity. src_b/dst_b index into `entity_handles`.

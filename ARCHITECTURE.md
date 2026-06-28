@@ -4,7 +4,7 @@
 
 Rust cdylib + Luanti mod building toward a **billion-voxel ecological simulation** where everything runs at full fidelity always, but different regions tick at different wall-clock rates based on local physics complexity. The player never perceives simulation boundaries or level-of-detail changes.
 
-Development is test-driven: each phase proves a specific capability through passing tests before moving to the next. Phases 1-7 are complete and form the proven foundation for the FEA architecture described below.
+Development is test-driven: each phase proves a specific capability through passing tests before moving to the next. Phases 1-8 are complete and form the proven foundation for the FEA architecture described below.
 
 ### Target Capabilities
 

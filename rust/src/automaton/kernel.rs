@@ -8,6 +8,30 @@ use std::sync::atomic::AtomicUsize;
 
 use crate::automaton::delta::{ContractKind, ContractList, NeighborOverrides};
 
+/// Apply flow between one real cell and one virtual neighbor held at `virtual_value`.
+/// The real cell loses flow (or gains if gradient is negative). Mass is not conserved:
+/// the virtual side is a reservoir, not a grid cell. `consumed` accumulates signed flow
+/// (positive = mass leaves the real cell). Remainder is reset after each call to prevent
+/// contamination of subsequent entries in the same post-pass.
+#[inline(always)]
+fn apply_one_sided(
+    source: &[u32],
+    target: &mut [u32],
+    src_a: u32,
+    dst_a: u32,
+    virtual_value: i64,
+    consumed: &mut i64,
+    conductivity: i64,
+    divisor: i64,
+    remainder_acc: &mut i64,
+) {
+    let gradient = source[src_a as usize] as i64 - virtual_value;
+    let flow = compute_flow(gradient, conductivity, divisor, remainder_acc);
+    *consumed += flow;
+    target[dst_a as usize] = ((target[dst_a as usize] as i64) - flow) as u32;
+    *remainder_acc = 0;
+}
+
 pub const TILE_SIZE: i16 = 16;
 
 /// 3D tile coordinate.
@@ -283,19 +307,38 @@ pub fn process_contract_list(
                 );
             }
             ContractKind::Void { consumed } => {
-                // Virtual neighbor is bottomless vacuum (value = 0).
-                let gradient = source[contract.src_a as usize] as i64;
-                let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
-                *consumed += flow;
-                target[contract.dst_a as usize] =
-                    ((target[contract.dst_a as usize] as i64) - flow) as u32;
-                // No write to dst_b: mass exits the simulation.
-                // Reset remainder to prevent this large sink from contaminating
-                // subsequent entries in the same pass.
-                remainder_acc = 0;
+                apply_one_sided(
+                    source,
+                    target,
+                    contract.src_a,
+                    contract.dst_a,
+                    0,
+                    consumed,
+                    conductivity,
+                    divisor,
+                    &mut remainder_acc,
+                );
+            }
+            ContractKind::Infinity {
+                target_value,
+                consumed,
+            } => {
+                apply_one_sided(
+                    source,
+                    target,
+                    contract.src_a,
+                    contract.dst_a,
+                    *target_value as i64,
+                    consumed,
+                    conductivity,
+                    divisor,
+                    &mut remainder_acc,
+                );
             }
             ContractKind::Remote | ContractKind::Entity => {
-                // Not yet implemented.
+                // Not yet implemented. Will use apply_one_sided with virtual_value sourced
+                // from RemoteEndpoint::cached_value or EntityHandle lua_ref respectively.
+                // they might also need to copy implementation details from Buffer since lua ticks are not necessarily sim steps, and the remote server might be lagging or behind or ticking at a different rate than the local server.
             }
         }
     }
