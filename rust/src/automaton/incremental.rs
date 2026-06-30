@@ -6,6 +6,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use crate::automaton::cadence::{CadenceTree, Gaaabb};
 use crate::automaton::delta::{ContractList, NeighborOverrides};
 use crate::automaton::field::{create_field, Field};
 use crate::automaton::kernel::{
@@ -29,6 +30,14 @@ pub struct StepController {
 
     /// Flat contract list (extra graph edges beyond the 3-per-voxel spatial loop).
     pub contract_list: ContractList,
+
+    /// Cadence partition: KD-tree assigning a tick-rate divisor to each region.
+    /// Starts as a single leaf covering the whole field at ambient cadence.
+    /// Bisect/coarsen operations create and dissolve tempo seams.
+    pub cadence_partition: CadenceTree,
+
+    /// Monotonically increasing global tick counter. Drives cadence scheduling.
+    pub global_tick: u64,
 }
 
 impl StepController {
@@ -50,12 +59,15 @@ impl StepController {
                     .unwrap()
             });
 
+        let region = Gaaabb::new([0, 0, 0], [width - 1, height - 1, depth - 1]);
         StepController {
             field,
             active_step: None,
             thread_pool,
             delta_overrides: NeighborOverrides::default(),
             contract_list: ContractList::new(),
+            cadence_partition: CadenceTree::new(region, 1),
+            global_tick: 0,
         }
     }
 
@@ -76,12 +88,15 @@ impl StepController {
                     .unwrap()
             });
 
+        let region = Gaaabb::new([0, 0, 0], [field.width - 1, field.height - 1, field.depth - 1]);
         StepController {
             field,
             active_step: None,
             thread_pool,
             delta_overrides: NeighborOverrides::default(),
             contract_list: ContractList::new(),
+            cadence_partition: CadenceTree::new(region, 1),
+            global_tick: 0,
         }
     }
 
@@ -185,6 +200,7 @@ impl StepController {
             self.field.cells = step.target;
             self.field.generation = step.target_generation;
             self.delta_overrides = step.delta_overrides;
+            self.global_tick += 1;
         }
     }
 }
