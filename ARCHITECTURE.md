@@ -208,17 +208,31 @@ These phases build toward the full FEA simulation. Each phase generalizes the pr
 - Performance validation ensures stepping is usable in-world (track A is blocking for Phase 9)
 - Delta modularity is the foundation for heterogeneous elements (machines, network clusterio, different tick rates) — can't build Phase 10+ without it (track B is blocking for Phase 10)
 
-#### Phase 9: Persistent Deltas & Variable Tick Rates (Adjacent Regions)
-- **Proves**: Two adjacent regions can tick at different rates while conserving mass across the boundary via persistent delta contracts
-- **Goal**: Closest design target for FEA. Not full Hilbert reindexing yet (Phase 9.5), just two regions in a field with different tick rates.
-- **Rust design**:
-  - Refactor `field_step_fused` to emit persistent `Delta` structures instead of transient flows
-  - `Delta` enum: `StandardFlow { source_idx, dest_idx, quantity }` (single-generation contract)
-  - Fast region (e.g., 60 Hz): Computes deltas at every tick, accumulates flows
-  - Slow region (e.g., 1 Hz): Only steps every N ticks, but drains accumulated deltas
-  - **Network-ready design**: Delta can be `RemoteFlow { local_idx, remote_host, remote_idx }` for clusterio (data-in-transit, picked up next tick without knowing remote state)
-- **Test (Rust)**: Two 64³ regions, boundary plane between them. Mark one as fast (step every tick), one as slow (step every 60th tick). Inject mass at center of fast region, observe gradient diffusing through boundary, verify total mass conserved
-- **Test (Lua)**: In-world performance: spawn two adjacent 64³ fields at different tick rates, visually confirm no pop-in or jerky transitions at boundary
+#### Phase 9: Variable Cadence Zones (split into 9a/9b/9c)
+
+See GLOSSARY.md for vocabulary: cadence, cadence zone, tempo seam, refinement anchor, GAAABB.
+
+**Infrastructure added in Phase 8 prep:**
+- `cadence.rs`: `Gaaabb`, `CadenceNode` (KD-tree leaf/split), `CadenceTree` with `bisect()`/`coarsen()`/`advance()`
+- `StepController` gains `cadence_partition: CadenceTree` and `global_tick: u64`
+- Fractional accumulator scheduling (hardware timer compare pattern): drift-free, phase-preserving
+
+#### Phase 9a: Create a Tempo Seam, Prove Conservation
+- **Proves**: A single bisect creates two cadence zones; mass is conserved across the seam across multiple ticks at mismatched rates
+- **Setup**: 32×16×16 field. `CadenceTree::bisect()` at x=16, lo cadence=1 (fast), hi cadence=4 (slow). Seam face-pairs at x=15↔16 get `NeighborKind::Buffered { drain_every: 4 }`. Inject mass at fast-zone center.
+- **Scheduler**: `StepController` calls `cadence_partition.advance()` each tick and steps only tiles whose GAAABB fired. Fast zone steps every tick; slow zone steps every 4th.
+- **Test (Rust)**: Run 32 ticks. Assert total field mass conserved at every tick (within stochastic rounding tolerance).
+
+#### Phase 9b: Destroy a Tempo Seam, Prove Conservation
+- **Proves**: A seam can be removed cleanly — Buffered accumulator fully drained, overrides deregistered — without violating conservation
+- **Setup**: Continue from 9a state after a drain tick has landed (accumulator at 0).
+- **Procedure**: Equalize cadences on both sides (set hi cadence=1), wait for accumulators to match phase, then `CadenceTree::coarsen()`. Remove Buffered overrides from seam face-pairs. Resume stepping as unified field.
+- **Test (Rust)**: Assert mass conserved through the coarsen event and for 32 ticks after.
+
+#### Phase 9c: KD-Tree Cadence Assignment Algorithm
+- **Proves**: A `RefinementAnchor` can drive the KD-tree to build a cadence gradient — nested GAAABBs tapering from fast at center to ambient at edge — and the scheduler handles it without per-tick branching
+- **Design**: `RefinementAnchor` trait emits `Vec<(Gaaabb, cadence)>` constraints. `StepController::apply_anchor()` bisects the tree to match, registers/deregisters Buffered seams. Scheduler reads `cadence_partition.advance()` result — flat GAAABB list, no merging at tick time.
+- **Test (Rust)**: Apply a hotspot anchor at field center producing 3 cadence shells (1, 2, 4). Run 64 ticks. Assert conservation. Move anchor one shell width; assert seam contracts migrate correctly and conservation holds through the transition.
 
 #### Phase 9.5: Hilbert Curve Indexing (Optional, Prior to Phase 10)
 - **Proves**: Hilbert-indexed field produces identical physics results with better cache performance

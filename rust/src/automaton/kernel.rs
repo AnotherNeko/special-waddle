@@ -23,16 +23,17 @@ fn apply_one_sided(
     consumed: &mut i64,
     conductivity: i64,
     divisor: i64,
+    dt: i64,
     remainder_acc: &mut i64,
 ) {
     let gradient = source[src_a as usize] as i64 - virtual_value;
-    let flow = compute_flow(gradient, conductivity, divisor, remainder_acc);
+    let flow = compute_flow(gradient, conductivity, divisor, dt, remainder_acc);
     *consumed += flow;
     target[dst_a as usize] = ((target[dst_a as usize] as i64) - flow) as u32;
     *remainder_acc = 0;
 }
 
-pub const TILE_SIZE: i16 = 16;
+pub const MAPBLOCK_SIZE: i16 = 16;
 
 /// 3D tile coordinate.
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +78,11 @@ pub struct IncrementalStep {
     /// Per-cell flag: true if this cell owns at least one override pair.
     /// Checked before the hash lookup to keep the modal fast path branch-free.
     pub cell_has_override: Vec<bool>,
+
+    /// Time step in global ticks for this step. 1 for full-field steps; equals the
+    /// zone's cadence for zone-selective steps. Scales flow proportionally so the
+    /// physical time constant is preserved across different cadences.
+    pub dt: i64,
 }
 
 /// Interleave bits of x, y, z to produce a Morton code.
@@ -135,9 +141,21 @@ pub fn compute_flow(
     gradient: i64,
     conductivity: i64,
     divisor: i64,
+    dt: i64,
     remainder_acc: &mut i64,
 ) -> i64 {
-    let product = gradient * conductivity;
+    debug_assert!(dt >= 1, "dt must be at least 1 global tick");
+    // Stability: conductivity * dt must be less than divisor to guarantee no cell
+    // loses more than its entire value in one step. Violation causes u32 underflow
+    // (wraps to near-u32::MAX), which has been observed to destroy conservation.
+    debug_assert!(
+        conductivity * dt < divisor,
+        "dt={} is too large: conductivity * dt ({}) >= divisor ({}); \
+         this step size violates the stability bound and will cause underflow. \
+         Reduce cadence or increase diffusion_rate (max safe dt ≈ {}).",
+        dt, conductivity * dt, divisor, divisor / conductivity,
+    );
+    let product = gradient * conductivity * dt;
     let flow_truncated = product / divisor;
     let remainder = product % divisor;
 
@@ -165,14 +183,16 @@ fn resolve_pair(
     gradient: i64,
     conductivity: i64,
     divisor: i64,
+    dt: i64,
     remainder_acc: &mut i64,
 ) -> i64 {
     if check {
         if let Some(kind) = overrides.get_mut(&(idx_a, idx_b)) {
-            return kind.apply(gradient, conductivity, divisor, remainder_acc, compute_flow);
+            return kind.apply(gradient, conductivity, divisor, remainder_acc,
+                |g, c, d, acc| compute_flow(g, c, d, dt, acc));
         }
     }
-    compute_flow(gradient, conductivity, divisor, remainder_acc)
+    compute_flow(gradient, conductivity, divisor, dt, remainder_acc)
 }
 
 /// Apply a resolved flow symmetrically to both sides of a spatial pair.
@@ -186,18 +206,19 @@ fn apply_pair(target: &mut [u32], idx_a: usize, idx_b: usize, flow: i64) {
 /// Formula: ΔΦ = (ΔV * C_mat) / (N_base * S_face * 2^shift * 2^16)
 /// Stability: divisor >= 7 ensures no cell loses more than 1/7 of its value per step.
 pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
-    let x_start = tile.tx as i16 * TILE_SIZE;
-    let y_start = tile.ty as i16 * TILE_SIZE;
-    let z_start = tile.tz as i16 * TILE_SIZE;
+    let x_start = tile.tx as i16 * MAPBLOCK_SIZE;
+    let y_start = tile.ty as i16 * MAPBLOCK_SIZE;
+    let z_start = tile.tz as i16 * MAPBLOCK_SIZE;
 
-    let x_end = (x_start + TILE_SIZE).min(step.width);
-    let y_end = (y_start + TILE_SIZE).min(step.height);
-    let z_end = (z_start + TILE_SIZE).min(step.depth);
+    let x_end = (x_start + MAPBLOCK_SIZE).min(step.width);
+    let y_end = (y_start + MAPBLOCK_SIZE).min(step.height);
+    let z_end = (z_start + MAPBLOCK_SIZE).min(step.depth);
 
     let shift = step.diffusion_rate as u32;
     // Conductivity is fixed at ~1.0 (fully conductive, scaled by 2^16)
     let conductivity = 65535i64;
     let divisor = (7i64 << shift) << 16;
+    let dt = step.dt;
     let mut remainder_acc = 0i64;
 
     // Phase A: Consume deltas (no-op for current diffusion)
@@ -228,11 +249,12 @@ pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
                         gradient,
                         conductivity,
                         divisor,
+                        dt,
                         &mut remainder_acc,
                     );
                     apply_pair(&mut step.target, idx_a, idx_b, flow);
                 } else {
-                    let flow = compute_flow(0, conductivity, divisor, &mut remainder_acc);
+                    let flow = compute_flow(0, conductivity, divisor, dt, &mut remainder_acc);
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                 }
 
@@ -248,11 +270,12 @@ pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
                         gradient,
                         conductivity,
                         divisor,
+                        dt,
                         &mut remainder_acc,
                     );
                     apply_pair(&mut step.target, idx_a, idx_b, flow);
                 } else {
-                    let flow = compute_flow(0, conductivity, divisor, &mut remainder_acc);
+                    let flow = compute_flow(0, conductivity, divisor, dt, &mut remainder_acc);
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                 }
 
@@ -268,11 +291,12 @@ pub fn process_tile(step: &mut IncrementalStep, tile: TileCoord) {
                         gradient,
                         conductivity,
                         divisor,
+                        dt,
                         &mut remainder_acc,
                     );
                     apply_pair(&mut step.target, idx_a, idx_b, flow);
                 } else {
-                    let flow = compute_flow(0, conductivity, divisor, &mut remainder_acc);
+                    let flow = compute_flow(0, conductivity, divisor, dt, &mut remainder_acc);
                     step.target[idx_a] = ((step.target[idx_a] as i64) - flow) as u32;
                 }
             }
@@ -287,6 +311,7 @@ pub fn process_contract_list(
     target: &mut [u32],
     contract_list: &mut ContractList,
     diffusion_rate: u8,
+    dt: i64,
 ) {
     let shift = diffusion_rate as u32;
     let conductivity = 65535i64;
@@ -298,7 +323,7 @@ pub fn process_contract_list(
             ContractKind::Portal => {
                 let gradient =
                     source[contract.src_a as usize] as i64 - source[contract.src_b as usize] as i64;
-                let flow = compute_flow(gradient, conductivity, divisor, &mut remainder_acc);
+                let flow = compute_flow(gradient, conductivity, divisor, dt, &mut remainder_acc);
                 apply_pair(
                     target,
                     contract.src_a as usize,
@@ -316,6 +341,7 @@ pub fn process_contract_list(
                     consumed,
                     conductivity,
                     divisor,
+                    dt,
                     &mut remainder_acc,
                 );
             }
@@ -332,6 +358,7 @@ pub fn process_contract_list(
                     consumed,
                     conductivity,
                     divisor,
+                    dt,
                     &mut remainder_acc,
                 );
             }

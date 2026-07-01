@@ -25,6 +25,7 @@
 pub mod automaton;
 pub mod ffi;
 pub mod state;
+mod tests;
 
 // Re-export public FFI API for C bindings
 pub use automaton::{Field, StepController};

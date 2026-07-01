@@ -6,11 +6,11 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::automaton::cadence::{CadenceTree, Gaaabb};
+use crate::automaton::cadence::{Cadence, CadenceTree, Gaaabb};
 use crate::automaton::delta::{ContractList, NeighborOverrides};
 use crate::automaton::field::{create_field, Field};
 use crate::automaton::kernel::{
-    build_tile_queue, process_contract_list, process_tile, IncrementalStep, TILE_SIZE,
+    build_tile_queue, process_contract_list, process_tile, IncrementalStep, MAPBLOCK_SIZE,
 };
 
 /// Manages the lifecycle of incremental steps for a Field.
@@ -59,14 +59,14 @@ impl StepController {
                     .unwrap()
             });
 
-        let region = Gaaabb::new([0, 0, 0], [width - 1, height - 1, depth - 1]);
+        let region = Gaaabb::new([0, 0, 0], [width, height, depth]);
         StepController {
             field,
             active_step: None,
             thread_pool,
             delta_overrides: NeighborOverrides::default(),
             contract_list: ContractList::new(),
-            cadence_partition: CadenceTree::new(region, 1),
+            cadence_partition: CadenceTree::new(region, Cadence::new(1)),
             global_tick: 0,
         }
     }
@@ -88,14 +88,14 @@ impl StepController {
                     .unwrap()
             });
 
-        let region = Gaaabb::new([0, 0, 0], [field.width - 1, field.height - 1, field.depth - 1]);
+        let region = Gaaabb::new([0, 0, 0], [field.width, field.height, field.depth]);
         StepController {
             field,
             active_step: None,
             thread_pool,
             delta_overrides: NeighborOverrides::default(),
             contract_list: ContractList::new(),
-            cadence_partition: CadenceTree::new(region, 1),
+            cadence_partition: CadenceTree::new(region, Cadence::new(1)),
             global_tick: 0,
         }
     }
@@ -120,9 +120,9 @@ impl StepController {
         let height = self.field.height;
         let depth = self.field.depth;
 
-        let tiles_x = (width as usize + TILE_SIZE as usize - 1) / TILE_SIZE as usize;
-        let tiles_y = (height as usize + TILE_SIZE as usize - 1) / TILE_SIZE as usize;
-        let tiles_z = (depth as usize + TILE_SIZE as usize - 1) / TILE_SIZE as usize;
+        let tiles_x = (width as usize + MAPBLOCK_SIZE as usize - 1) / MAPBLOCK_SIZE as usize;
+        let tiles_y = (height as usize + MAPBLOCK_SIZE as usize - 1) / MAPBLOCK_SIZE as usize;
+        let tiles_z = (depth as usize + MAPBLOCK_SIZE as usize - 1) / MAPBLOCK_SIZE as usize;
         let total_tiles = tiles_x * tiles_y * tiles_z;
 
         let source = self.field.cells.clone();
@@ -151,6 +151,7 @@ impl StepController {
             diffusion_rate: self.field.diffusion_rate,
             delta_overrides,
             cell_has_override,
+            dt: 1,
         };
 
         self.active_step = Some(step);
@@ -189,6 +190,42 @@ impl StepController {
         while !self.tick(u64::MAX) {}
     }
 
+    /// Step only the zones whose GAAABB appears in `firing` (zone-selective scheduling).
+    /// Tiles that do not overlap any firing zone are copied unchanged into the output.
+    /// Call with the result of `cadence_partition.advance()` each global tick.
+    /// Each zone's Cadence is used as dt so physical time constants are cadence-invariant.
+    pub fn step_zones_blocking(&mut self, firing: &[(Gaaabb, Cadence)]) {
+        if firing.is_empty() {
+            return;
+        }
+        self.begin_step().ok();
+        // Process each firing zone separately so tiles use their zone's cadence as dt.
+        for (zone, cadence) in firing {
+            let step = match self.active_step.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            step.dt = cadence.get() as i64;
+            for i in 0..step.total_tiles {
+                let tile = step.tile_queue[i];
+                let x0 = tile.tx as i16 * MAPBLOCK_SIZE;
+                let y0 = tile.ty as i16 * MAPBLOCK_SIZE;
+                let z0 = tile.tz as i16 * MAPBLOCK_SIZE;
+                let x1 = x0 + MAPBLOCK_SIZE;
+                let y1 = y0 + MAPBLOCK_SIZE;
+                let z1 = z0 + MAPBLOCK_SIZE;
+                let in_zone = x0 < zone.max[0] && x1 > zone.min[0]
+                    && y0 < zone.max[1] && y1 > zone.min[1]
+                    && z0 < zone.max[2] && z1 > zone.min[2];
+                if in_zone {
+                    process_tile(step, tile);
+                }
+            }
+        }
+        // Contract list uses the last zone's dt. TODO: per-contract zone lookup.
+        self.finalize_step();
+    }
+
     fn finalize_step(&mut self) {
         if let Some(mut step) = self.active_step.take() {
             process_contract_list(
@@ -196,6 +233,7 @@ impl StepController {
                 &mut step.target,
                 &mut self.contract_list,
                 step.diffusion_rate,
+                step.dt,
             );
             self.field.cells = step.target;
             self.field.generation = step.target_generation;
@@ -713,7 +751,7 @@ mod tests {
             let log = kind.log().expect("should be Logged variant");
             assert!(!log.is_empty(), "log should have at least one entry");
             let mut acc = 0i64;
-            let expected_flow = compute_flow(expected_gradient, conductivity, divisor, &mut acc);
+            let expected_flow = compute_flow(expected_gradient, conductivity, divisor, 1, &mut acc);
             // Allow ±1: the tile's shared remainder_acc carries state from prior pairs,
             // so the logged flow may differ by 1 from a fresh-accumulator call.
             assert!(
@@ -886,11 +924,17 @@ mod tests {
         ctrl.field.cells[i_a] = 1_000_000;
         let mass_before: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
 
-        ctrl.delta_overrides.insert((i_a, i_b), NeighborKind::Mirror);
+        ctrl.delta_overrides
+            .insert((i_a, i_b), NeighborKind::Mirror);
         ctrl.contract_list.contracts.push(Contract {
-            src_a: i_a as u32, src_b: 0,
-            dst_a: i_a as u32, dst_b: 0,
-            kind: ContractKind::Infinity { target_value: 0, consumed: 0 },
+            src_a: i_a as u32,
+            src_b: 0,
+            dst_a: i_a as u32,
+            dst_b: 0,
+            kind: ContractKind::Infinity {
+                target_value: 0,
+                consumed: 0,
+            },
         });
 
         for _ in 0..16 {
@@ -904,8 +948,11 @@ mod tests {
             _ => panic!("expected Infinity"),
         };
         assert!(consumed > 0, "Infinity sink: never activated");
-        assert_eq!(consumed, mass_lost,
-            "Infinity sink: consumed ({}) must equal mass removed ({})", consumed, mass_lost);
+        assert_eq!(
+            consumed, mass_lost,
+            "Infinity sink: consumed ({}) must equal mass removed ({})",
+            consumed, mass_lost
+        );
 
         // --- source mode: cell below target gains mass ------------------------------
         let mut ctrl2 = StepController::new(4, 4, 4, 0, 1);
@@ -916,11 +963,18 @@ mod tests {
         ctrl2.field.cells[i_c] = 0;
         let mass_before2: u64 = ctrl2.field.cells.iter().map(|&v| v as u64).sum();
 
-        ctrl2.delta_overrides.insert((i_c, i_d), NeighborKind::Mirror);
+        ctrl2
+            .delta_overrides
+            .insert((i_c, i_d), NeighborKind::Mirror);
         ctrl2.contract_list.contracts.push(Contract {
-            src_a: i_c as u32, src_b: 0,
-            dst_a: i_c as u32, dst_b: 0,
-            kind: ContractKind::Infinity { target_value, consumed: 0 },
+            src_a: i_c as u32,
+            src_b: 0,
+            dst_a: i_c as u32,
+            dst_b: 0,
+            kind: ContractKind::Infinity {
+                target_value,
+                consumed: 0,
+            },
         });
 
         for _ in 0..16 {
@@ -935,8 +989,13 @@ mod tests {
         };
         assert!(mass_gained > 0, "Infinity source: cell never filled");
         // consumed is negative when mass flows into the cell (gradient is negative)
-        assert_eq!((-consumed2) as u64, mass_gained,
-            "Infinity source: |consumed| ({}) must equal mass gained ({})", -consumed2, mass_gained);
+        assert_eq!(
+            (-consumed2) as u64,
+            mass_gained,
+            "Infinity source: |consumed| ({}) must equal mass gained ({})",
+            -consumed2,
+            mass_gained
+        );
     }
 
     /// Phase 8B: Modal override produces identical output to no override.
