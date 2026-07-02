@@ -180,25 +180,34 @@ return function(M)
         local area = VoxelArea:new({ MinEdge = emerged_min, MaxEdge = emerged_max })
 
         local grayscale_ids = {}
+        local grayscale_id_set = {}
         for i = 0, 255 do
-            grayscale_ids[i] = minetest.get_content_id(string.format("voxel_automata:mass_%03d", i))
+            local id = minetest.get_content_id(string.format("voxel_automata:mass_%03d", i))
+            grayscale_ids[i] = id
+            grayscale_id_set[id] = true
         end
         local air_id = minetest.get_content_id("air")
+        grayscale_id_set[air_id] = true
 
         local nonzero_count = 0
         for z = 0, field_size - 1 do
             for y = 0, field_size - 1 do
                 for x = 0, field_size - 1 do
-                    local value = va.va_sc_field_get(M.global_step_controller, x, y, z)
-                    local grayscale = math.floor(value / 16777216)
-                    if grayscale > 255 then grayscale = 255 end
                     local vi = area:indexp({
                         x = field_anchor.x + x,
                         y = field_anchor.y + y,
                         z = field_anchor.z + z
                     })
-                    data[vi] = grayscale > 0 and grayscale_ids[grayscale] or air_id
-                    if value > 0 then nonzero_count = nonzero_count + 1 end
+                    -- Skip voxels already occupied by something placed in the
+                    -- field (e.g. an infinity contract node) so the overlay
+                    -- doesn't stomp it back to a grayscale block.
+                    if grayscale_id_set[data[vi]] then
+                        local value = va.va_sc_field_get(M.global_step_controller, x, y, z)
+                        local grayscale = math.floor(value / 16777216)
+                        if grayscale > 255 then grayscale = 255 end
+                        data[vi] = grayscale > 0 and grayscale_ids[grayscale] or air_id
+                        if value > 0 then nonzero_count = nonzero_count + 1 end
+                    end
                 end
             end
         end

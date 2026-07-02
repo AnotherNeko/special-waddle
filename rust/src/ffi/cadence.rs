@@ -283,7 +283,9 @@ pub extern "C" fn va_sc_infinity_create(
         let contract = Contract {
             src_a: index,
             src_b: 0,
-            dst_a: 0,
+            // apply_one_sided writes the computed flow into target[dst_a], so
+            // this must be the same cell the gradient was measured from.
+            dst_a: index,
             dst_b: 0,
             kind: ContractKind::Infinity { target_value, consumed: 0 },
         };

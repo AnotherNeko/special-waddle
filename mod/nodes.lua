@@ -55,7 +55,6 @@ return function(M)
             light_source = 0,
             sunlight_propagates = true,
             walkable = false,
-            pointable = false,
             buildable_to = true,
             groups = { not_in_creative_inventory = 1 },
         })
@@ -102,7 +101,6 @@ return function(M)
             light_source = 0,
             sunlight_propagates = true,
             walkable = false,
-            pointable = false,
             buildable_to = true,
             groups = { not_in_creative_inventory = 1 },
         })

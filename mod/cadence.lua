@@ -97,19 +97,28 @@ return function(M)
         local area = VoxelArea:new({ MinEdge = emin, MaxEdge = emax })
 
         local cadence_ids = {}
+        local cadence_id_set = {}
         for i = 1, 32 do
-            cadence_ids[i] = minetest.get_content_id(
+            local id = minetest.get_content_id(
                 string.format("voxel_automata:cadence_%02d", i))
+            cadence_ids[i] = id
+            cadence_id_set[id] = true
         end
         local air_id = minetest.get_content_id("air")
+        cadence_id_set[air_id] = true
 
         for z = 0, field_w - 1 do
             for y = 0, field_w - 1 do
                 for x = 0, field_w - 1 do
-                    local c = va.va_sc_cadence_lookup(M.global_step_controller, x, y, z)
-                    local node_id = cadence_ids[math.min(c, 32)] or air_id
                     local vi = area:indexp({ x = ox + x, y = oy + y, z = oz + z })
-                    data[vi] = node_id
+                    -- Skip voxels already occupied by something placed in the
+                    -- field (seamplane, infinity contract, ...) so the overlay
+                    -- doesn't stomp it back to a cadence-color block.
+                    if cadence_id_set[data[vi]] then
+                        local c = va.va_sc_cadence_lookup(M.global_step_controller, x, y, z)
+                        local node_id = cadence_ids[math.min(c, 32)] or air_id
+                        data[vi] = node_id
+                    end
                 end
             end
         end
@@ -306,6 +315,9 @@ return function(M)
                             local fcx = meta:get_int("field_x")
                             local fcy = meta:get_int("field_y")
                             local fcz = meta:get_int("field_z")
+                            minetest.log("action", string.format(
+                                "[voxel_automata] Infinity %d%% activated: world_pos=%s field=(%d,%d,%d)",
+                                percent, minetest.pos_to_string(pos), fcx, fcy, fcz))
                             local result = va.va_sc_infinity_create(M.global_step_controller, fcx, fcy, fcz, value)
                             if result == 0 then
                                 minetest.swap_node(pos, { name = "voxel_automata:infinity_" .. percent .. "_on" })
@@ -313,8 +325,9 @@ return function(M)
                                     "[voxel_automata] Infinity " ..
                                     percent .. "% contract created at (" .. fcx .. "," .. fcy .. "," .. fcz .. ")")
                             else
-                                minetest.log("warning",
-                                    "[voxel_automata] Failed to create Infinity " .. percent .. "% contract")
+                                minetest.log("warning", string.format(
+                                    "[voxel_automata] Failed to create Infinity %d%% contract at field=(%d,%d,%d) (field size 16x16x16)",
+                                    percent, fcx, fcy, fcz))
                             end
                         end,
                         rules = mesecon.rules.alldirs,
@@ -324,7 +337,12 @@ return function(M)
                     local above = pointed_thing.above
                     minetest.set_node(above, { name = "voxel_automata:infinity_" .. percent .. "_off" })
                     local meta = minetest.get_meta(above)
-                    local ox = M.viewport_anchor.x + math.ceil(16 / 16) * 16
+                    -- Infinity contracts couple into the mass field (rendered by
+                    -- render_field_grayscale), which is anchored at
+                    -- viewport_anchor.x - 16, not the cadence overlay's anchor
+                    -- (viewport_anchor.x + 16). Must match render_field_grayscale's
+                    -- field_anchor exactly or field coordinates land out of bounds.
+                    local ox = M.viewport_anchor.x - math.ceil(16 / 16) * 16
                     meta:set_int("field_x", above.x - ox)
                     meta:set_int("field_y", above.y - M.viewport_anchor.y)
                     meta:set_int("field_z", above.z - M.viewport_anchor.z)
