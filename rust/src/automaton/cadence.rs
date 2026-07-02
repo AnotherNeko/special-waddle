@@ -414,6 +414,11 @@ impl CadenceTree {
         self.root.lookup_cadence(x, y, z)
     }
 
+    /// Collect all leaves into a flat list (for scheduler iteration).
+    pub fn leaves(&self) -> Vec<&CadenceNode> {
+        self.root.leaves()
+    }
+
     /// Advance all leaf accumulators by one global tick.
     /// Returns (GAAABB, Cadence) for each zone that fires this tick. The Cadence
     /// value is the dt (time step in global ticks) to pass to compute_flow.

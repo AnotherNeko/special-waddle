@@ -29,8 +29,30 @@ pub struct Field {
     pub conductivity: u16, // Material conductivity, scaled by 2^16. Default: 65536 (fully conductive)
 }
 
+/// Initialize a field with the given dimensions and diffusion rate (non zero u32).
+pub fn create_field(
+    width: i16,
+    height: i16,
+    depth: i16,
+    initial: std::num::NonZeroU32,
+    diffusion_rate: u8,
+) -> Field {
+    let size = (width as usize) * (height as usize) * (depth as usize);
+    // Third Law of Thermodynamics: absolute zero is unattainable.
+    // Initialize all cells to 1 (minimum non-zero quantum of conserved quantity).
+    Field {
+        width,
+        height,
+        depth,
+        cells: vec![initial.get(); size],
+        generation: 0,
+        diffusion_rate,
+        conductivity: 65535, // Fully conductive by default (C_mat ~ 1.0)
+    }
+}
+
 /// Initialize a field with the given dimensions and diffusion rate.
-pub fn create_field(width: i16, height: i16, depth: i16, diffusion_rate: u8) -> Field {
+pub fn create_field_1(width: i16, height: i16, depth: i16, diffusion_rate: u8) -> Field {
     let size = (width as usize) * (height as usize) * (depth as usize);
     // Third Law of Thermodynamics: absolute zero is unattainable.
     // Initialize all cells to 1 (minimum non-zero quantum of conserved quantity).
@@ -312,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_create_field() {
-        let field = create_field(8, 8, 8, 3);
+        let field = create_field_1(8, 8, 8, 3);
         assert_eq!(field.width, 8);
         assert_eq!(field.height, 8);
         assert_eq!(field.depth, 8);
@@ -325,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_field_set_get() {
-        let mut field = create_field(8, 8, 8, 3);
+        let mut field = create_field_1(8, 8, 8, 3);
 
         field_set(&mut field, 4, 4, 4, 1000);
         assert_eq!(field_get(&field, 4, 4, 4).unwrap().get(), 1000);
@@ -340,7 +362,7 @@ mod tests {
     #[test]
     fn test_conservation_single_cell() {
         // Test that the total mass (sum of all cells) is preserved after stepping
-        let mut field = create_field(8, 8, 8, 2);
+        let mut field = create_field_1(8, 8, 8, 2);
 
         let total_mass = 1_000_000u32;
         field_set(&mut field, 4, 4, 4, total_mass);
@@ -366,7 +388,7 @@ mod tests {
     fn test_diffusion_spreads_symmetric() {
         // Test that diffusion spreads symmetrically from a point source
         // After 1 step, all 6 neighbors should have equal values
-        let mut field = create_field(16, 16, 16, 2);
+        let mut field = create_field_1(16, 16, 16, 2);
 
         // Account for Third Law: field starts with 16^3 * 1 = 4096 minimum quantum
         let initial_background = (16i64 * 16 * 16) as u64;
@@ -410,7 +432,7 @@ mod tests {
     #[test]
     fn test_diffusion_spreads_from_edge() {
         // Test spreading from a cell at the edge (boundary condition)
-        let mut field = create_field(8, 8, 8, 2);
+        let mut field = create_field_1(8, 8, 8, 2);
 
         field_set(&mut field, 0, 4, 4, 1_000_000u32);
 
@@ -427,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_generation_increments() {
-        let mut field = create_field(8, 8, 8, 3);
+        let mut field = create_field_1(8, 8, 8, 3);
         assert_eq!(field.generation, 0);
 
         field_step(&mut field);
@@ -442,7 +464,7 @@ mod tests {
         // Third Law: fields cannot reach absolute zero. Minimum quantum is 1.
         // A field initialized to all 1s (minimum non-zero state) should maintain
         // that minimum value (no cell can drop below the quantum).
-        let mut field = create_field(8, 8, 8, 3);
+        let mut field = create_field_1(8, 8, 8, 3);
         // create_field initializes all cells to 1
 
         field_step(&mut field);
@@ -497,7 +519,7 @@ mod tests {
         let expected_sum: u64 = reference_cells.iter().map(|&v| v as u64).sum();
 
         for algo in all_algorithms() {
-            let mut field = create_field(width, height, depth, diffusion_rate);
+            let mut field = create_field_1(width, height, depth, diffusion_rate);
             field.cells = reference_cells.clone();
 
             for _ in 0..4 {
@@ -525,8 +547,8 @@ mod tests {
         let reference_cells = generate_noisy_state(width, height, depth, 42);
 
         for algo in all_algorithms() {
-            let mut field1 = create_field(width, height, depth, diffusion_rate);
-            let mut field2 = create_field(width, height, depth, diffusion_rate);
+            let mut field1 = create_field_1(width, height, depth, diffusion_rate);
+            let mut field2 = create_field_1(width, height, depth, diffusion_rate);
             field1.cells = reference_cells.clone();
             field2.cells = reference_cells.clone();
 
@@ -571,7 +593,7 @@ mod tests {
         let expected_sum: u64 = reference_cells.iter().map(|&v| v as u64).sum();
 
         // Generate baseline (fused algorithm = canonical rotationally-symmetric)
-        let mut baseline_field = create_field(width, height, depth, diffusion_rate);
+        let mut baseline_field = create_field_1(width, height, depth, diffusion_rate);
         baseline_field.cells = reference_cells.clone();
         for _ in 0..4 {
             field_step_fused(&mut baseline_field);
@@ -580,7 +602,7 @@ mod tests {
         let mut failures = Vec::new();
 
         for algo in all_algorithms() {
-            let mut field = create_field(width, height, depth, diffusion_rate);
+            let mut field = create_field_1(width, height, depth, diffusion_rate);
             field.cells = reference_cells.clone();
 
             for _ in 0..4 {
@@ -648,7 +670,7 @@ mod tests {
         let expected_sum: u64 = reference_cells.iter().map(|&v| v as u64).sum();
 
         // Test sequential algorithm
-        let mut seq_field = create_field(width, height, depth, diffusion_rate);
+        let mut seq_field = create_field_1(width, height, depth, diffusion_rate);
         seq_field.cells = reference_cells.clone();
         for _ in 0..4 {
             field_step(&mut seq_field);
@@ -661,7 +683,7 @@ mod tests {
         );
 
         // Test fused algorithm
-        let mut fused_field = create_field(width, height, depth, diffusion_rate);
+        let mut fused_field = create_field_1(width, height, depth, diffusion_rate);
         fused_field.cells = reference_cells.clone();
         for _ in 0..4 {
             field_step_fused(&mut fused_field);
@@ -841,7 +863,7 @@ mod tests {
         // Verify perfect mass conservation across all steps and contracts.
         let diffusion_rate = 2u8;
 
-        let mut field = create_field(2, 2, 2, diffusion_rate);
+        let mut field = create_field_1(2, 2, 2, diffusion_rate);
         // Set initial values: 0, 50, 100, 150, 200, 250, 300, 350
         let initial_values = [0u32, 50, 100, 150, 200, 250, 300, 350];
         let mut idx = 0;
@@ -935,7 +957,7 @@ mod tests {
 
         // Step 2: trace and verify
         eprintln!("\n  --- STEP 2 ---");
-        let mut field_step2 = create_field(2, 2, 2, diffusion_rate);
+        let mut field_step2 = create_field_1(2, 2, 2, diffusion_rate);
         field_step2.cells = cells_1.clone();
         let (_contracts_2, cells_2) = trace_all_contracts_2x2x2(&field_step2);
         dump_2x2x2("AFTER STEP 2 (trace)", &cells_2, &field_step2);
@@ -986,7 +1008,7 @@ mod tests {
 
         let reference_cells = generate_noisy_state(width, height, depth, 9999);
 
-        let mut field = create_field(width, height, depth, diffusion_rate);
+        let mut field = create_field_1(width, height, depth, diffusion_rate);
         field.cells = reference_cells;
 
         let start = std::time::Instant::now();
@@ -1022,7 +1044,7 @@ mod tests {
     ) -> f64 {
         let reference_cells = generate_noisy_state(width, height, depth, seed);
 
-        let mut field = create_field(width, height, depth, diffusion_rate);
+        let mut field = create_field_1(width, height, depth, diffusion_rate);
         field.cells = reference_cells;
 
         let start = std::time::Instant::now();
@@ -1047,7 +1069,7 @@ mod tests {
         eprintln!("\n=== Memory Footprint ===\n");
 
         for (w, h, d, label) in sizes {
-            let field = create_field(w, h, d, 3);
+            let field = create_field_1(w, h, d, 3);
             let cell_bytes = (w as usize) * (h as usize) * (d as usize) * 4;
             let field_overhead = std::mem::size_of::<Field>();
             let total = cell_bytes + field_overhead;
@@ -1077,8 +1099,8 @@ mod tests {
 
         let reference_cells = generate_noisy_state(width, height, depth, 42);
 
-        let mut field1 = create_field(width, height, depth, diffusion_rate);
-        let mut field2 = create_field(width, height, depth, diffusion_rate);
+        let mut field1 = create_field_1(width, height, depth, diffusion_rate);
+        let mut field2 = create_field_1(width, height, depth, diffusion_rate);
 
         field1.cells = reference_cells.clone();
         field2.cells = reference_cells.clone();
@@ -1115,7 +1137,7 @@ mod tests {
 
         let reference_cells = generate_noisy_state(width, height, depth, 2024);
 
-        let mut field = create_field(width, height, depth, diffusion_rate);
+        let mut field = create_field_1(width, height, depth, diffusion_rate);
         field.cells = reference_cells;
 
         let initial_sum: u64 = field.cells.iter().map(|&v| v as u64).sum();
@@ -1143,7 +1165,7 @@ mod tests {
 
         let reference_cells = generate_noisy_state(width, height, depth, 9999);
 
-        let mut field = create_field(width, height, depth, diffusion_rate);
+        let mut field = create_field_1(width, height, depth, diffusion_rate);
         field.cells = reference_cells;
 
         let start = std::time::Instant::now();
@@ -1182,7 +1204,7 @@ mod tests {
     {
         let reference_cells = generate_noisy_state(width, height, depth, seed);
 
-        let mut field = create_field(width, height, depth, diffusion_rate);
+        let mut field = create_field_1(width, height, depth, diffusion_rate);
         field.cells = reference_cells;
 
         let start = std::time::Instant::now();
@@ -1203,7 +1225,7 @@ mod tests {
 
     /// Helper: Create a 2×2×2 cube of uniform value at center of 8×8×8 field.
     fn create_centered_cube_field(diffusion_rate: u8, value: u32) -> Field {
-        let mut field = create_field(8, 8, 8, diffusion_rate);
+        let mut field = create_field_1(8, 8, 8, diffusion_rate);
         // Center: (3-4, 3-4, 3-4) in 0-7 range
         for x in 3..5 {
             for y in 3..5 {
@@ -1218,7 +1240,7 @@ mod tests {
     /// Helper: Flip field axes to test symmetry (xyz -> yxz)
     fn flip_axes_xyz_to_yxz(field: &Field) -> Field {
         let mut flipped =
-            create_field(field.height, field.width, field.depth, field.diffusion_rate);
+            create_field_1(field.height, field.width, field.depth, field.diffusion_rate);
         for x in 0..field.width {
             for y in 0..field.height {
                 for z in 0..field.depth {
@@ -1421,7 +1443,7 @@ mod tests {
 
             let reference_cells = generate_noisy_state(width, height, depth, 9999);
 
-            let mut field = create_field(width, height, depth, diffusion_rate);
+            let mut field = create_field_1(width, height, depth, diffusion_rate);
             field.cells = reference_cells;
 
             let start = std::time::Instant::now();

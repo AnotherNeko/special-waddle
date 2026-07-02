@@ -14,7 +14,7 @@ pub mod region;
 pub mod stepping;
 
 pub use field::{
-    create_field, field_get, field_in_bounds, field_index_of, field_set, field_step, Field,
+    create_field_1, field_get, field_in_bounds, field_index_of, field_set, field_step, Field,
 };
 pub use grid::{count_neighbors, create_grid, in_bounds, index_of};
 pub use incremental::StepController;

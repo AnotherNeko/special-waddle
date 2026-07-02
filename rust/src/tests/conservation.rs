@@ -18,7 +18,7 @@ fn test_mass_conservation_tempo_seam() {
     const SEAM_X: i16 = 16;
     const DRAIN_EVERY: u32 = 4;
 
-    let mut ctrl = StepController::new(W, H, D, 3, 1);
+    let mut ctrl = StepController::new_1(W, H, D, 3, 1);
     ctrl.field.cells.iter_mut().for_each(|c| *c = ROOM_TEMP);
     // Hot spot in fast zone to drive diffusion across the seam.
     field_set(&mut ctrl.field, 8, 8, 8, 1_000_000_000);
@@ -81,7 +81,7 @@ fn test_mass_conservation_seam_teardown() {
     const SEAM_X: i16 = 16;
     const DRAIN_EVERY: u32 = 7; // matches lo cadence so drain lands every lo-cycle
 
-    let mut ctrl = StepController::new(W, H, D, 3, 1);
+    let mut ctrl = StepController::new_1(W, H, D, 3, 1);
     ctrl.field.cells.iter_mut().for_each(|c| *c = ROOM_TEMP);
     field_set(&mut ctrl.field, 8, 8, 8, 1_000_000_000);
 

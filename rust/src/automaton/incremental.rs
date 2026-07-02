@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::automaton::cadence::{Cadence, CadenceTree, Gaaabb};
 use crate::automaton::delta::{ContractList, NeighborOverrides};
-use crate::automaton::field::{create_field, Field};
+use crate::automaton::field::{create_field, create_field_1, Field};
 use crate::automaton::kernel::{
     build_tile_queue, process_contract_list, process_tile, IncrementalStep, MAPBLOCK_SIZE,
 };
@@ -41,9 +41,22 @@ pub struct StepController {
 }
 
 impl StepController {
+    /// Create a new step controller with the given dimensions, initial cell value, and thread pool size.
+    pub fn new(
+        width: i16,
+        height: i16,
+        depth: i16,
+        initial: std::num::NonZeroU32,
+        diffusion_rate: u8,
+        num_threads: u8,
+    ) -> Self {
+        let field = create_field(width, height, depth, initial, diffusion_rate);
+        Self::from_field(field, num_threads)
+    }
+
     /// Create a new step controller with the given dimensions and thread pool size.
-    pub fn new(width: i16, height: i16, depth: i16, diffusion_rate: u8, num_threads: u8) -> Self {
-        let field = create_field(width, height, depth, diffusion_rate);
+    pub fn new_1(width: i16, height: i16, depth: i16, diffusion_rate: u8, num_threads: u8) -> Self {
+        let field = create_field_1(width, height, depth, diffusion_rate);
         let num_threads = if num_threads == 0 {
             1
         } else {
@@ -214,9 +227,12 @@ impl StepController {
                 let x1 = x0 + MAPBLOCK_SIZE;
                 let y1 = y0 + MAPBLOCK_SIZE;
                 let z1 = z0 + MAPBLOCK_SIZE;
-                let in_zone = x0 < zone.max[0] && x1 > zone.min[0]
-                    && y0 < zone.max[1] && y1 > zone.min[1]
-                    && z0 < zone.max[2] && z1 > zone.min[2];
+                let in_zone = x0 < zone.max[0]
+                    && x1 > zone.min[0]
+                    && y0 < zone.max[1]
+                    && y1 > zone.min[1]
+                    && z0 < zone.max[2]
+                    && z1 > zone.min[2];
                 if in_zone {
                     process_tile(step, tile);
                 }
@@ -266,7 +282,7 @@ pub fn field_step_incremental(field: &mut crate::automaton::field::Field) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automaton::field::{create_field, field_get, field_set, field_step_fused};
+    use crate::automaton::field::{create_field_1, field_get, field_set, field_step_fused};
     use crate::automaton::kernel::compute_flow;
 
     fn generate_noisy_state(width: i16, height: i16, depth: i16, seed_base: u32) -> Vec<u32> {
@@ -292,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_create_step_controller() {
-        let ctrl = StepController::new(16, 16, 16, 2, 1);
+        let ctrl = StepController::new_1(16, 16, 16, 2, 1);
         assert_eq!(ctrl.field.width, 16);
         assert_eq!(ctrl.field.height, 16);
         assert_eq!(ctrl.field.depth, 16);
@@ -301,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_begin_step() {
-        let mut ctrl = StepController::new(16, 16, 16, 2, 1);
+        let mut ctrl = StepController::new_1(16, 16, 16, 2, 1);
         assert!(ctrl.begin_step().is_ok());
         assert!(ctrl.is_stepping());
 
@@ -311,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_step_blocking() {
-        let mut ctrl = StepController::new(8, 8, 8, 2, 1);
+        let mut ctrl = StepController::new_1(8, 8, 8, 2, 1);
         field_set(&mut ctrl.field, 4, 4, 4, 1_000_000);
 
         let initial_sum: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
@@ -331,13 +347,13 @@ mod tests {
         let cells = generate_noisy_state(128, 128, 128, 42);
         let expected_sum: u64 = cells.iter().map(|&v| v as u64).sum();
 
-        let mut fused_field = create_field(128, 128, 128, 3);
+        let mut fused_field = create_field_1(128, 128, 128, 3);
         fused_field.cells = cells.clone();
         for _ in 0..4 {
             field_step_fused(&mut fused_field);
         }
 
-        let mut ctrl = StepController::new(128, 128, 128, 3, 1);
+        let mut ctrl = StepController::new_1(128, 128, 128, 3, 1);
         ctrl.field.cells = cells;
         for _ in 0..4 {
             ctrl.step_blocking();
@@ -376,11 +392,11 @@ mod tests {
     fn test_incremental_ticking_matches_blocking() {
         let cells = generate_noisy_state(64, 64, 64, 99);
 
-        let mut blocking = StepController::new(64, 64, 64, 3, 1);
+        let mut blocking = StepController::new_1(64, 64, 64, 3, 1);
         blocking.field.cells = cells.clone();
         blocking.step_blocking();
 
-        let mut ticking = StepController::new(64, 64, 64, 3, 1);
+        let mut ticking = StepController::new_1(64, 64, 64, 3, 1);
         ticking.field.cells = cells;
         ticking.begin_step().unwrap();
         let mut ticks = 0;
@@ -397,7 +413,7 @@ mod tests {
         let cells = generate_noisy_state(128, 128, 128, 2024);
         let expected_sum: u64 = cells.iter().map(|&v| v as u64).sum();
 
-        let mut ctrl = StepController::new(128, 128, 128, 3, 1);
+        let mut ctrl = StepController::new_1(128, 128, 128, 3, 1);
         ctrl.field.cells = cells;
 
         for _ in 0..4 {
@@ -412,13 +428,13 @@ mod tests {
     fn test_determinism_128cubed() {
         let cells = generate_noisy_state(128, 128, 128, 42);
 
-        let mut ctrl1 = StepController::new(128, 128, 128, 3, 1);
+        let mut ctrl1 = StepController::new_1(128, 128, 128, 3, 1);
         ctrl1.field.cells = cells.clone();
         for _ in 0..4 {
             ctrl1.step_blocking();
         }
 
-        let mut ctrl2 = StepController::new(128, 128, 128, 3, 1);
+        let mut ctrl2 = StepController::new_1(128, 128, 128, 3, 1);
         ctrl2.field.cells = cells;
         for _ in 0..4 {
             ctrl2.step_blocking();
@@ -429,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_small_field_single_tile() {
-        let mut ctrl = StepController::new(8, 8, 8, 2, 1);
+        let mut ctrl = StepController::new_1(8, 8, 8, 2, 1);
         field_set(&mut ctrl.field, 4, 4, 4, 1_000_000);
 
         let initial_sum: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
@@ -445,7 +461,7 @@ mod tests {
         let cells = generate_noisy_state(100, 100, 100, 555);
         let expected_sum: u64 = cells.iter().map(|&v| v as u64).sum();
 
-        let mut ctrl = StepController::new(100, 100, 100, 2, 1);
+        let mut ctrl = StepController::new_1(100, 100, 100, 2, 1);
         ctrl.field.cells = cells;
 
         ctrl.step_blocking();
@@ -459,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_minimum_field_stays_minimum() {
-        let mut ctrl = StepController::new(16, 16, 16, 3, 1);
+        let mut ctrl = StepController::new_1(16, 16, 16, 3, 1);
         ctrl.step_blocking();
         assert!(
             ctrl.field.cells.iter().all(|&c| c >= 1),
@@ -469,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_boundary_cell() {
-        let mut ctrl = StepController::new(16, 16, 16, 2, 1);
+        let mut ctrl = StepController::new_1(16, 16, 16, 2, 1);
         field_set(&mut ctrl.field, 0, 8, 8, 1_000_000);
 
         let initial_sum: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
@@ -487,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_boundary_cell_stochastic_rounding_symmetry() {
-        let mut ctrl = StepController::new(3, 3, 3, 2, 1);
+        let mut ctrl = StepController::new_1(3, 3, 3, 2, 1);
         field_set(&mut ctrl.field, 1, 1, 1, 1);
 
         let mut boundary_history = vec![];
@@ -560,7 +576,7 @@ mod tests {
     fn test_debug_u32_underflow_game_scenario() {
         eprintln!("\n========== DEBUG: U32 Underflow Game Scenario ==========");
 
-        let mut ctrl = StepController::new(16, 16, 16, 3, 1);
+        let mut ctrl = StepController::new_1(16, 16, 16, 3, 1);
 
         let initial_val = 1_000_000_000u32;
         field_set(&mut ctrl.field, 0, 0, 0, initial_val);
@@ -631,7 +647,7 @@ mod tests {
         let cells = generate_noisy_state(64, 64, 64, 12345);
         let expected_sum: u64 = cells.iter().map(|&v| v as u64).sum();
 
-        let mut ctrl = StepController::new(64, 64, 64, 3, 1);
+        let mut ctrl = StepController::new_1(64, 64, 64, 3, 1);
         ctrl.field.cells = cells;
 
         eprintln!("Initial total mass: {}", expected_sum);
@@ -691,7 +707,7 @@ mod tests {
     fn benchmark_incremental_blocking_256x256x128_2steps() {
         let cells = generate_noisy_state(256, 256, 128, 9999);
 
-        let mut ctrl = StepController::new(256, 256, 128, 3, 1);
+        let mut ctrl = StepController::new_1(256, 256, 128, 3, 1);
         ctrl.field.cells = cells;
 
         let start = Instant::now();
@@ -720,7 +736,7 @@ mod tests {
     fn test_logged_delta_matches_modal() {
         use crate::automaton::delta::NeighborKind;
 
-        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl = StepController::new_1(4, 4, 4, 0, 1);
 
         let w = ctrl.field.width;
         let h = ctrl.field.height;
@@ -780,7 +796,7 @@ mod tests {
 
         // 4×4×4, diffusion_rate=0 for predictable divisor.
         // reminder that diffusion rate is inversely proportional to actual flow rate.
-        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl = StepController::new_1(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
@@ -827,7 +843,7 @@ mod tests {
     fn test_mirror_delta_conserves_mass() {
         use crate::automaton::delta::NeighborKind;
 
-        let mut ctrl = StepController::new(8, 8, 8, 1, 1);
+        let mut ctrl = StepController::new_1(8, 8, 8, 1, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
@@ -864,7 +880,7 @@ mod tests {
     fn test_void_delta_is_mass_sink() {
         use crate::automaton::delta::{Contract, ContractKind, NeighborKind};
 
-        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl = StepController::new_1(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
@@ -915,7 +931,7 @@ mod tests {
         use crate::automaton::delta::{Contract, ContractKind, NeighborKind};
 
         // --- sink mode: cell above target loses mass --------------------------------
-        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl = StepController::new_1(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
         let i_a = idx(w, h, 0, 0, 0);
@@ -955,7 +971,7 @@ mod tests {
         );
 
         // --- source mode: cell below target gains mass ------------------------------
-        let mut ctrl2 = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl2 = StepController::new_1(4, 4, 4, 0, 1);
         let target_value: u32 = 500_000;
         let i_c = idx(w, h, 0, 0, 0);
         let i_d = idx(w, h, 1, 0, 0);
@@ -1004,7 +1020,7 @@ mod tests {
         use crate::automaton::delta::NeighborKind;
 
         // Baseline: no overrides.
-        let mut baseline = StepController::new(4, 4, 4, 0, 1);
+        let mut baseline = StepController::new_1(4, 4, 4, 0, 1);
         let w = baseline.field.width;
         let h = baseline.field.height;
         baseline.field.cells[idx(w, h, 0, 0, 0)] = 50_000;
@@ -1013,7 +1029,7 @@ mod tests {
         let baseline_cells = baseline.field.cells.clone();
 
         // With explicit Modal override on the same pair.
-        let mut with_modal = StepController::new(4, 4, 4, 0, 1);
+        let mut with_modal = StepController::new_1(4, 4, 4, 0, 1);
         with_modal.field.cells[idx(w, h, 0, 0, 0)] = 50_000;
         with_modal.field.cells[idx(w, h, 1, 0, 0)] = 10_000;
         let i_a = idx(w, h, 0, 0, 0);
@@ -1034,7 +1050,7 @@ mod tests {
     fn test_logged_delta_accumulates_across_steps() {
         use crate::automaton::delta::NeighborKind;
 
-        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl = StepController::new_1(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
@@ -1071,7 +1087,7 @@ mod tests {
     fn test_cell_has_override_flag_population() {
         use crate::automaton::delta::NeighborKind;
 
-        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl = StepController::new_1(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
@@ -1131,7 +1147,7 @@ mod tests {
     fn test_override_added_mid_run_deferred() {
         use crate::automaton::delta::NeighborKind;
 
-        let mut ctrl = StepController::new(4, 4, 4, 0, 1);
+        let mut ctrl = StepController::new_1(4, 4, 4, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
@@ -1177,7 +1193,7 @@ mod tests {
         use crate::automaton::delta::NeighborKind;
 
         // 32×16×16: tiles split at x=16, so (15, 0, 0)→(16, 0, 0) is a boundary pair.
-        let mut ctrl = StepController::new(32, 16, 16, 0, 1);
+        let mut ctrl = StepController::new_1(32, 16, 16, 0, 1);
         let w = ctrl.field.width;
         let h = ctrl.field.height;
 
@@ -1352,7 +1368,7 @@ mod tests {
         let blob_mass = 1_000_000u32;
 
         // --- Field A: blob at center ---
-        let mut ctrl_a = StepController::new(w, h, d, 3, 1);
+        let mut ctrl_a = StepController::new_1(w, h, d, 3, 1);
         let cx = w / 2;
         let cy = h / 2;
         let cz = d / 2;
@@ -1363,7 +1379,7 @@ mod tests {
         }
 
         // --- Field B: blob at corner (0,0,0) ---
-        let mut ctrl_b = StepController::new(w, h, d, 3, 1);
+        let mut ctrl_b = StepController::new_1(w, h, d, 3, 1);
         ctrl_b.field.cells[idx(w, h, 0, 0, 0)] = blob_mass;
         register_3torus_portals(&mut ctrl_b);
         for _ in 0..steps {
@@ -1399,7 +1415,7 @@ mod tests {
         let i_a = idx(w, h, 0, 0, 0);
         let i_b = idx(w, h, 1, 0, 0);
 
-        let mut ctrl = StepController::new(w, h, d, 3, 1);
+        let mut ctrl = StepController::new_1(w, h, d, 3, 1);
         // Small gradient: keeps remainder_acc contamination below the firing threshold
         // for i_b's own zero-gradient pairs in the same tile.
         ctrl.field.cells[i_a] = 100;

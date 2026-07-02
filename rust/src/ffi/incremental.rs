@@ -16,7 +16,29 @@ pub extern "C" fn va_create_step_controller(
         return std::ptr::null_mut();
     }
 
-    let ctrl = StepController::new(width, height, depth, diffusion_rate, num_threads);
+    let ctrl = StepController::new_1(width, height, depth, diffusion_rate, num_threads);
+    Box::into_raw(Box::new(ctrl))
+}
+
+/// Create a new StepController with the given dimensions, initial cell value, and thread
+/// pool size. `initial_value` of 0 is clamped to 1 (Third Law of Thermodynamics).
+/// Returns a pointer to the allocated StepController, or NULL if allocation fails.
+#[no_mangle]
+pub extern "C" fn va_create_step_controller_with_initial(
+    width: i16,
+    height: i16,
+    depth: i16,
+    initial_value: u32,
+    diffusion_rate: u8,
+    num_threads: u8,
+) -> *mut StepController {
+    if width <= 0 || height <= 0 || depth <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    let initial =
+        std::num::NonZeroU32::new(initial_value).unwrap_or(std::num::NonZeroU32::new(1).unwrap());
+    let ctrl = StepController::new(width, height, depth, initial, diffusion_rate, num_threads);
     Box::into_raw(Box::new(ctrl))
 }
 

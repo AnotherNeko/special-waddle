@@ -1,6 +1,6 @@
 //! FFI interface for field operations (Phase 6: Integer Field + Delta Diffusion)
 
-use crate::automaton::{create_field, field_get, field_set, field_step, Field};
+use crate::automaton::{create_field_1, field_get, field_set, field_step, Field};
 
 /// Create a new field with the given dimensions and diffusion rate.
 /// Returns a pointer to the allocated Field, or NULL if allocation fails.
@@ -15,7 +15,7 @@ pub extern "C" fn va_create_field(
         return std::ptr::null_mut();
     }
 
-    let field = create_field(width, height, depth, diffusion_rate);
+    let field = create_field_1(width, height, depth, diffusion_rate);
     Box::into_raw(Box::new(field))
 }
 

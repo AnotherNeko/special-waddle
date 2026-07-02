@@ -11,7 +11,7 @@ const INFINITY_CELL: usize = 1 * 3 * 3 + 1 * 3 + 1; // = 13
 const MEASURE_CELL: usize = 2 * 3 * 3 + 2 * 3 + 5; // = 29: (x=2,y=0,z=3), away from sink
 
 fn build_ctrl(initial: u32, cadence: Cadence) -> StepController {
-    let mut ctrl = StepController::new(W, H, D, DIFFUSION_RATE, 1);
+    let mut ctrl = StepController::new_1(W, H, D, DIFFUSION_RATE, 1);
     ctrl.field.cells.iter_mut().for_each(|c| *c = initial);
     ctrl.contract_list.contracts.push(Contract {
         src_a: INFINITY_CELL as u32,

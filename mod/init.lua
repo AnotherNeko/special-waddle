@@ -50,6 +50,7 @@ ffi.cdef [[
     // Phase 8a: Non-blocking incremental stepping
     typedef struct StepController StepController;
     StepController* va_create_step_controller(int16_t w, int16_t h, int16_t d, uint8_t diffusion_rate, uint8_t num_threads);
+    StepController* va_create_step_controller_with_initial(int16_t w, int16_t h, int16_t d, uint32_t initial_value, uint8_t diffusion_rate, uint8_t num_threads);
     void va_destroy_step_controller(StepController* ctrl);
     void va_sc_field_set(StepController* ctrl, int16_t x, int16_t y, int16_t z, uint32_t value);
     uint32_t va_sc_field_get(const StepController* ctrl, int16_t x, int16_t y, int16_t z);
@@ -61,6 +62,7 @@ ffi.cdef [[
 
     // Phase 9c: Cadence FFI
     uint32_t va_sc_cadence_advance(StepController* ctrl, int16_t* out_zone_data, uint32_t max_zones);
+    uint32_t va_sc_cadence_leaves(const StepController* ctrl, int16_t* out_leaf_data, uint32_t max_leaves);
     uint32_t va_sc_cadence_step(StepController* ctrl);
     int32_t  va_sc_cadence_bisect(StepController* ctrl,
                                    int16_t px, int16_t py, int16_t pz,

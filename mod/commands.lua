@@ -321,4 +321,63 @@ return function(M)
             end
         end
     })
+
+    minetest.register_chatcommand("va_field_create", {
+        description = "Create a new field and start cadence animation. Usage: /va_field_create [size_x] [size_y] [size_z] [initial_value]",
+        func = function(name, param)
+            local parts = {}
+            for part in param:gmatch("[^ ]+") do
+                table.insert(parts, tonumber(part))
+            end
+
+            local size_x = parts[1] or 16
+            local size_y = parts[2] or size_x
+            local size_z = parts[3] or size_x
+            local initial_value = parts[4] or 300e6
+
+            if size_x < 8 or size_x > 256 or size_y < 8 or size_y > 256 or size_z < 8 or size_z > 256 then
+                return false, "Dimensions must be between 8 and 256"
+            end
+
+            if initial_value < 0 or initial_value > 4294967295 then
+                return false, "Initial value must be between 0 and 4294967295"
+            end
+
+            -- Destroy old controller
+            if M.global_step_controller ~= nil then
+                va.va_destroy_step_controller(M.global_step_controller)
+                minetest.log("action", "[voxel_automata] Destroyed old step controller")
+            end
+
+            -- Create new controller, seeded to initial_value (microkelvin) everywhere
+            local ctrl = va.va_create_step_controller_with_initial(
+                size_x, size_y, size_z, math.floor(initial_value), 2, 1)
+            if ctrl == nil then
+                return false, "Failed to create step controller"
+            end
+
+            M.global_step_controller = ctrl
+
+            -- Position at player location (mapblock-aligned)
+            local player = minetest.get_player_by_name(name)
+            if player then
+                local pos = player:get_pos()
+                M.viewport_anchor.x = math.floor(pos.x / 16) * 16
+                M.viewport_anchor.y = math.floor(pos.y / 16) * 16
+                M.viewport_anchor.z = math.floor(pos.z / 16) * 16
+            end
+
+            -- Start cadence animation
+            M.animation_state.running = true
+
+            -- Render the field
+            M.render_field_grayscale()
+            M.render_cadence_zones()
+
+            minetest.chat_send_player(name,
+                string.format("[voxel_automata] Field created: %dx%dx%d (initial=%d) at %s, cadence animation started",
+                    size_x, size_y, size_z, math.floor(initial_value), minetest.pos_to_string(M.viewport_anchor)))
+            return true, "Field created and animation started"
+        end
+    })
 end

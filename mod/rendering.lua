@@ -150,16 +150,22 @@ return function(M)
             placed_count, world_x, world_y, world_z))
     end
 
-    -- Render global StepController field as grayscale at field_anchor (y+50)
+    -- Render global StepController field as grayscale at field_anchor
+    -- (one mapblock west of viewport_anchor, so the player's own mapblock stays clear
+    -- and they can stand between this and the cadence overlay to the east)
     function M.render_field_grayscale()
         if not M.global_step_controller then return end
 
+        local field_size = 16
         local field_anchor = {
-            x = M.viewport_anchor.x,
-            y = M.viewport_anchor.y + 50,
+            x = M.viewport_anchor.x - math.ceil(field_size / 16) * 16,
+            y = M.viewport_anchor.y,
             z = M.viewport_anchor.z
         }
-        local field_size = 16
+
+        minetest.log("action", string.format(
+            "[voxel_automata] Field render starting: anchor=(%d,%d,%d) size=%dx%dx%d",
+            field_anchor.x, field_anchor.y, field_anchor.z, field_size, field_size, field_size))
 
         local world_min = field_anchor
         local world_max = {

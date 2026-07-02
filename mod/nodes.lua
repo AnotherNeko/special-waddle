@@ -63,17 +63,40 @@ return function(M)
 
     minetest.log("action", "[voxel_automata] Registered 256 grayscale mass nodes")
 
-    -- Phase 9c: Register 32 cadence nodes using palette texture
-    for i = 1, 32 do
+    -- Phase 9c: Register 32 cadence nodes from palette.json
+    local palette_path = minetest.get_modpath("voxel_automata") .. "/textures/cadence colors/palette.json"
+    local palette = {}
+
+    local palette_file = io.open(palette_path, "r")
+    if palette_file then
+        local palette_json = palette_file:read("*a")
+        palette_file:close()
+
+        -- Simple JSON parsing for array of {r, g, b} objects
+        local function parse_palette_json(json_str)
+            local result = {}
+            for r, g, b in json_str:gmatch('"r"%s*:%s*(%d+),%s*"g"%s*:%s*(%d+),%s*"b"%s*:%s*(%d+)') do
+                table.insert(result, { tonumber(r), tonumber(g), tonumber(b) })
+            end
+            return result
+        end
+
+        palette = parse_palette_json(palette_json)
+    else
+        minetest.log("warning", "[voxel_automata] Could not load palette.json, using fallback")
+        -- Fallback palette (copied from extraction)
+        palette = {}
+    end
+
+    for i = 1, math.min(#palette, 32) do
         local node_name = string.format("voxel_automata:cadence_%02d", i)
+        local rgb = palette[i]
 
         minetest.register_node(node_name, {
             description = string.format("Cadence Zone (period %d)", i),
             tiles = { {
-                name = "voxel_automata_cadence_palette.png",
-                -- Palette strips are typically vertical; select row i-1 from height=32
-                animation = { type = "vertical_frames", aspect_w = 1, aspect_h = 1,
-                              length = 32 },
+                name = "voxel_automata_grayscale.png",
+                color = { r = rgb[1], g = rgb[2], b = rgb[3] },
             } },
             paramtype = "light",
             light_source = 0,
@@ -85,5 +108,5 @@ return function(M)
         })
     end
 
-    minetest.log("action", "[voxel_automata] Registered 32 cadence zone nodes")
+    minetest.log("action", "[voxel_automata] Registered " .. math.min(#palette, 32) .. " cadence zone nodes from palette")
 end
