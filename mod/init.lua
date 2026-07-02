@@ -58,6 +58,23 @@ ffi.cdef [[
     int32_t va_sc_tick(StepController* ctrl, uint64_t budget_us);
     int32_t va_sc_is_stepping(const StepController* ctrl);
     void va_sc_step_blocking(StepController* ctrl);
+
+    // Phase 9c: Cadence FFI
+    uint32_t va_sc_cadence_advance(StepController* ctrl, int16_t* out_zone_data, uint32_t max_zones);
+    uint32_t va_sc_cadence_step(StepController* ctrl);
+    int32_t  va_sc_cadence_bisect(StepController* ctrl,
+                                   int16_t px, int16_t py, int16_t pz,
+                                   uint8_t axis, int16_t coord,
+                                   uint16_t lo_cadence, uint16_t hi_cadence);
+    int32_t  va_sc_cadence_merge_poll(StepController* ctrl,
+                                      int16_t null_x, int16_t null_y, int16_t null_z,
+                                      int16_t alt_x,  int16_t alt_y,  int16_t alt_z);
+    uint16_t va_sc_cadence_lookup(StepController* ctrl, int16_t x, int16_t y, int16_t z);
+    uint64_t va_sc_global_tick(const StepController* ctrl);
+
+    // Phase 9c: Infinity Contract FFI
+    int32_t va_sc_infinity_create(StepController* ctrl, int16_t x, int16_t y, int16_t z, uint32_t target_value);
+    int32_t va_sc_infinity_destroy(StepController* ctrl, int16_t x, int16_t y, int16_t z);
 ]]
 
 local va = ffi.load(modpath .. "/lib/libvoxel_automata.so")
@@ -85,6 +102,7 @@ dofile(modpath .. "/coordinates.lua")(M)
 dofile(modpath .. "/rendering.lua")(M)
 dofile(modpath .. "/startup_tests.lua")(M)
 dofile(modpath .. "/nodes.lua")(M)
+dofile(modpath .. "/cadence.lua")(M)
 dofile(modpath .. "/animation.lua")(M)
 dofile(modpath .. "/perf.lua")(M)
 dofile(modpath .. "/commands.lua")(M)

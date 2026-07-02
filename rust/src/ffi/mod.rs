@@ -6,6 +6,7 @@
 //! The actual logic is in the `automaton` module. These functions are thin wrappers
 //! that handle null checks, pointer safety, and C-to-Rust conversions.
 
+pub mod cadence;
 pub mod field;
 pub mod grid;
 pub mod incremental;
@@ -13,6 +14,10 @@ pub mod lifecycle;
 pub mod region;
 pub mod simple;
 
+pub use cadence::{
+    va_sc_cadence_advance, va_sc_cadence_bisect, va_sc_cadence_lookup, va_sc_cadence_merge_poll,
+    va_sc_cadence_step, va_sc_global_tick, va_sc_infinity_create, va_sc_infinity_destroy,
+};
 pub use field::{
     va_create_field, va_destroy_field, va_field_get, va_field_get_generation, va_field_set,
     va_field_step,

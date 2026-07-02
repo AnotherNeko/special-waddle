@@ -62,4 +62,28 @@ return function(M)
     end
 
     minetest.log("action", "[voxel_automata] Registered 256 grayscale mass nodes")
+
+    -- Phase 9c: Register 32 cadence nodes using palette texture
+    for i = 1, 32 do
+        local node_name = string.format("voxel_automata:cadence_%02d", i)
+
+        minetest.register_node(node_name, {
+            description = string.format("Cadence Zone (period %d)", i),
+            tiles = { {
+                name = "voxel_automata_cadence_palette.png",
+                -- Palette strips are typically vertical; select row i-1 from height=32
+                animation = { type = "vertical_frames", aspect_w = 1, aspect_h = 1,
+                              length = 32 },
+            } },
+            paramtype = "light",
+            light_source = 0,
+            sunlight_propagates = true,
+            walkable = false,
+            pointable = false,
+            buildable_to = true,
+            groups = { not_in_creative_inventory = 1 },
+        })
+    end
+
+    minetest.log("action", "[voxel_automata] Registered 32 cadence zone nodes")
 end

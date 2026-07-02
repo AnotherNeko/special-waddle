@@ -251,4 +251,74 @@ return function(M)
             return true, "Info displayed"
         end
     })
+
+    minetest.register_chatcommand("va_cadence_show", {
+        description = "Force-render the cadence zone overlay now",
+        func = function(name, param)
+            if not M.global_step_controller then
+                return false, "No StepController available"
+            end
+
+            local start_time = minetest.get_us_time()
+            M.render_cadence_zones()
+            local elapsed = (minetest.get_us_time() - start_time) / 1000
+
+            minetest.chat_send_player(name,
+                string.format("[voxel_automata] Cadence zones rendered in %.2f ms", elapsed))
+            return true, "Cadence zones rendered"
+        end
+    })
+
+    minetest.register_chatcommand("va_cadence_info", {
+        description = "Print per-zone cadence information",
+        func = function(name, param)
+            if not M.global_step_controller then
+                return false, "No StepController available"
+            end
+
+            minetest.chat_send_player(name, "[voxel_automata] Cadence zones (sample voxels):")
+            local cadences = {}
+            for i = 0, 15 do
+                local c = va.va_sc_cadence_lookup(M.global_step_controller, i, 0, 0)
+                if not cadences[c] then
+                    cadences[c] = i
+                end
+            end
+
+            for cadence, x in pairs(cadences) do
+                minetest.chat_send_player(name,
+                    string.format("[voxel_automata]   x=%d: cadence=%d", x, cadence))
+            end
+
+            local global_tick = va.va_sc_global_tick(M.global_step_controller)
+            minetest.chat_send_player(name,
+                "[voxel_automata] Global tick: " .. tonumber(global_tick))
+            return true, "Cadence info displayed"
+        end
+    })
+
+    minetest.register_chatcommand("va_cadence_animate", {
+        description = "Enable/disable cadence-aware stepping in the animation loop. Usage: /va_cadence_animate [on|off]",
+        func = function(name, param)
+            if not M.global_step_controller then
+                return false, "No StepController available"
+            end
+
+            local toggle = param:lower():match("^(%w+)$") or "toggle"
+            if toggle == "on" or toggle == "true" then
+                M.animation_state.running = true
+                minetest.chat_send_player(name, "[voxel_automata] Cadence animation enabled")
+                return true, "Cadence animation enabled"
+            elseif toggle == "off" or toggle == "false" then
+                M.animation_state.running = false
+                minetest.chat_send_player(name, "[voxel_automata] Cadence animation disabled")
+                return true, "Cadence animation disabled"
+            else
+                M.animation_state.running = not M.animation_state.running
+                local status = M.animation_state.running and "enabled" or "disabled"
+                minetest.chat_send_player(name, "[voxel_automata] Cadence animation " .. status)
+                return true, "Cadence animation toggled"
+            end
+        end
+    })
 end
