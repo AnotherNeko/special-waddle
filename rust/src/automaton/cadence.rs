@@ -83,6 +83,48 @@ pub struct SeamPlane {
     pub region: Gaaabb,
 }
 
+impl SeamPlane {
+    /// Enumerate all (lo_idx, hi_idx) pairs on the seam face for a field of given dimensions.
+    /// Row-major indexing: idx = z * height * width + y * width + x.
+    pub fn face_pairs(&self, width: i16, height: i16, depth: i16) -> Vec<(usize, usize)> {
+        let stride = |x: i16, y: i16, z: i16| {
+            z as usize * height as usize * width as usize + y as usize * width as usize + x as usize
+        };
+        let r = &self.region;
+        let mut pairs = Vec::new();
+        match self.axis {
+            0 => {
+                let x_lo = self.coord - 1;
+                let x_hi = self.coord;
+                for z in r.min[2]..r.max[2] {
+                    for y in r.min[1]..r.max[1] {
+                        pairs.push((stride(x_lo, y, z), stride(x_hi, y, z)));
+                    }
+                }
+            }
+            1 => {
+                let y_lo = self.coord - 1;
+                let y_hi = self.coord;
+                for z in r.min[2]..r.max[2] {
+                    for x in r.min[0]..r.max[0] {
+                        pairs.push((stride(x, y_lo, z), stride(x, y_hi, z)));
+                    }
+                }
+            }
+            _ => {
+                let z_lo = self.coord - 1;
+                let z_hi = self.coord;
+                for y in r.min[1]..r.max[1] {
+                    for x in r.min[0]..r.max[0] {
+                        pairs.push((stride(x, y, z_lo), stride(x, y, z_hi)));
+                    }
+                }
+            }
+        }
+        pairs
+    }
+}
+
 /// A node in the cadence KD-tree.
 pub enum CadenceNode {
     Leaf {
@@ -109,9 +151,18 @@ impl CadenceNode {
     pub fn lookup_cadence(&self, x: i16, y: i16, z: i16) -> Cadence {
         match self {
             CadenceNode::Leaf { cadence, .. } => *cadence,
-            CadenceNode::Split { axis, coord, lo, hi } => {
+            CadenceNode::Split {
+                axis,
+                coord,
+                lo,
+                hi,
+            } => {
                 let v = [x, y, z][*axis as usize];
-                if v < *coord { lo.lookup_cadence(x, y, z) } else { hi.lookup_cadence(x, y, z) }
+                if v < *coord {
+                    lo.lookup_cadence(x, y, z)
+                } else {
+                    hi.lookup_cadence(x, y, z)
+                }
             }
         }
     }
@@ -121,7 +172,11 @@ impl CadenceNode {
     /// pass to compute_flow so the physical time constant is cadence-invariant.
     pub fn advance(&mut self, stepping: &mut Vec<(Gaaabb, Cadence)>) {
         match self {
-            CadenceNode::Leaf { region, cadence, accumulator } => {
+            CadenceNode::Leaf {
+                region,
+                cadence,
+                accumulator,
+            } => {
                 *accumulator += 1;
                 if *accumulator >= cadence.get() {
                     *accumulator -= cadence.get();
@@ -164,7 +219,11 @@ impl CadenceNode {
                 let mut hi_region = region.clone();
                 hi_region.min[axis as usize] = coord;
 
-                let seam = SeamPlane { axis, coord, region: region.clone() };
+                let seam = SeamPlane {
+                    axis,
+                    coord,
+                    region: region.clone(),
+                };
 
                 *self = CadenceNode::Split {
                     axis,
@@ -183,12 +242,33 @@ impl CadenceNode {
 
                 Some(seam)
             }
-            CadenceNode::Split { axis: split_axis, coord: split_coord, lo, hi } => {
+            CadenceNode::Split {
+                axis: split_axis,
+                coord: split_coord,
+                lo,
+                hi,
+            } => {
                 let v = point[*split_axis as usize];
                 if v < *split_coord {
-                    lo.bisect(point, axis, coord, lo_cadence, lo_accumulator, hi_cadence, hi_accumulator)
+                    lo.bisect(
+                        point,
+                        axis,
+                        coord,
+                        lo_cadence,
+                        lo_accumulator,
+                        hi_cadence,
+                        hi_accumulator,
+                    )
                 } else {
-                    hi.bisect(point, axis, coord, lo_cadence, lo_accumulator, hi_cadence, hi_accumulator)
+                    hi.bisect(
+                        point,
+                        axis,
+                        coord,
+                        lo_cadence,
+                        lo_accumulator,
+                        hi_cadence,
+                        hi_accumulator,
+                    )
                 }
             }
         }
@@ -200,11 +280,17 @@ impl CadenceNode {
     /// Returns the SeamPlane that was dissolved, or None if coarsening was not possible.
     ///
     /// TODO(phase rotation meter): Merging two leaves whose accumulators are out of phase
-    /// requires a controller that nudges one zone's cadence until accumulators converge,
+    /// requires a controller looking at a synchroscope that nudges one zone's cadence until accumulators converge,
     /// then coarsens. Do not brute-force a merge when accumulators differ — the resulting
     /// phase discontinuity will inject or destroy mass at the moment of merge.
     pub fn coarsen(&mut self, point: [i16; 3]) -> Option<SeamPlane> {
-        let CadenceNode::Split { axis, coord, lo, hi } = self else {
+        let CadenceNode::Split {
+            axis,
+            coord,
+            lo,
+            hi,
+        } = self
+        else {
             return None;
         };
 
@@ -216,8 +302,16 @@ impl CadenceNode {
         }
 
         if let (
-            CadenceNode::Leaf { region: lo_region, cadence: lo_cad, accumulator: lo_acc },
-            CadenceNode::Leaf { region: hi_region, cadence: hi_cad, accumulator: hi_acc },
+            CadenceNode::Leaf {
+                region: lo_region,
+                cadence: lo_cad,
+                accumulator: lo_acc,
+            },
+            CadenceNode::Leaf {
+                region: hi_region,
+                cadence: hi_cad,
+                accumulator: hi_acc,
+            },
         ) = (lo.as_ref(), hi.as_ref())
         {
             if lo_cad == hi_cad && lo_acc == hi_acc {
@@ -239,6 +333,42 @@ impl CadenceNode {
         None
     }
 
+    /// Set the cadence of the leaf containing `point` to `new_cadence`.
+    /// The accumulator is preserved so the caller can decide when to coarsen.
+    /// Returns true if a leaf was found and updated.
+    pub fn set_cadence(&mut self, point: [i16; 3], new_cadence: Cadence) -> bool {
+        match self {
+            CadenceNode::Leaf { cadence, .. } => {
+                *cadence = new_cadence;
+                true
+            }
+            CadenceNode::Split {
+                axis,
+                coord,
+                lo,
+                hi,
+            } => {
+                let v = point[*axis as usize];
+                if v < *coord {
+                    lo.set_cadence(point, new_cadence)
+                } else {
+                    hi.set_cadence(point, new_cadence)
+                }
+            }
+        }
+    }
+
+    /// Return the (cadence, accumulator) of the leaf containing `point`.
+    fn leaf_state(&self, point: [i16; 3]) -> (Cadence, u16) {
+        match self {
+            CadenceNode::Leaf { cadence, accumulator, .. } => (*cadence, *accumulator),
+            CadenceNode::Split { axis, coord, lo, hi } => {
+                let v = point[*axis as usize];
+                if v < *coord { lo.leaf_state(point) } else { hi.leaf_state(point) }
+            }
+        }
+    }
+
     /// Collect all leaves into a flat list (for scheduler iteration).
     pub fn leaves(&self) -> Vec<&CadenceNode> {
         match self {
@@ -250,6 +380,14 @@ impl CadenceNode {
             }
         }
     }
+}
+
+/// Result of a `CadenceTree::merge()` poll.
+pub enum SyncStatus {
+    /// Zones are not yet in phase; cadence adjustment applied or still drifting.
+    Syncing,
+    /// Zones converged and were coarsened. Contains the dissolved seam.
+    Done(SeamPlane),
 }
 
 /// The cadence partition for a field. Starts as a single leaf at ambient cadence.
@@ -295,11 +433,64 @@ impl CadenceTree {
         hi_cadence: Cadence,
         hi_accumulator: u16,
     ) -> Option<SeamPlane> {
-        self.root.bisect(point, axis, coord, lo_cadence, lo_accumulator, hi_cadence, hi_accumulator)
+        self.root.bisect(
+            point,
+            axis,
+            coord,
+            lo_cadence,
+            lo_accumulator,
+            hi_cadence,
+            hi_accumulator,
+        )
     }
 
     pub fn coarsen(&mut self, point: [i16; 3]) -> Option<SeamPlane> {
         self.root.coarsen(point)
+    }
+
+    /// Set the cadence of the leaf containing `point`.
+    pub fn set_cadence(&mut self, point: [i16; 3], new_cadence: Cadence) -> bool {
+        self.root.set_cadence(point, new_cadence)
+    }
+
+    /// Synchronize two zones for coarsening using the synchroscope-and-throttle protocol.
+    ///
+    /// `null_point`: a point in the reference zone (cadence is the merge target, unchanged).
+    /// `alt_point`: a point in the zone being synchronized (cadence is nudged ±1).
+    ///
+    /// Call once per tick after `advance()`. On the first call (alt and null cadences equal,
+    /// diff ≠ 0), nudges alt cadence by ±1 based on the sign of (alt_acc − null_acc).
+    /// On subsequent calls, polls until accumulators match; when they do, restores alt
+    /// cadence to null cadence and coarsens. Returns `Done(seam)` on completion.
+    ///
+    /// The cadence nudge creates a known phase drift — caller need not compute the rate.
+    pub fn merge(&mut self, null_point: [i16; 3], alt_point: [i16; 3]) -> SyncStatus {
+        let (null_cad, null_acc) = self.root.leaf_state(null_point);
+        let (alt_cad, alt_acc) = self.root.leaf_state(alt_point);
+
+        let diff = alt_acc as i32 - null_acc as i32;
+
+        if diff == 0 {
+            // Restore alt cadence to null cadence if a nudge was applied, then coarsen.
+            if alt_cad != null_cad {
+                self.root.set_cadence(alt_point, null_cad);
+            }
+            if let Some(seam) = self.root.coarsen(null_point) {
+                return SyncStatus::Done(seam);
+            }
+            // coarsen failed (e.g. not siblings) — fall through to Syncing
+        } else if alt_cad == null_cad {
+            // First call: apply a one-tick nudge to start the drift.
+            let nudged = if diff > 0 {
+                Cadence::new(null_cad.get() + 1) // alt is ahead, slow it down
+            } else {
+                Cadence::new(null_cad.get().saturating_sub(1).max(1)) // alt is behind, speed it up
+            };
+            self.root.set_cadence(alt_point, nudged);
+        }
+        // If alt_cad != null_cad and diff != 0: still drifting, nothing to do.
+
+        SyncStatus::Syncing
     }
 }
 
@@ -311,7 +502,9 @@ mod tests {
         Gaaabb::new([0, 0, 0], [32, 16, 16])
     }
 
-    fn c(n: u16) -> Cadence { Cadence::new(n) }
+    fn c(n: u16) -> Cadence {
+        Cadence::new(n)
+    }
 
     #[test]
     fn test_single_leaf_lookup() {
@@ -327,7 +520,7 @@ mod tests {
         assert!(tree.advance().is_empty()); // acc=1
         assert!(tree.advance().is_empty()); // acc=2
         assert!(tree.advance().is_empty()); // acc=3
-        let stepping = tree.advance();      // acc=4>=4, step, acc=0
+        let stepping = tree.advance(); // acc=4>=4, step, acc=0
         assert_eq!(stepping.len(), 1);
         assert_eq!(stepping[0].0, field_region());
         assert_eq!(stepping[0].1, c(4)); // dt = cadence
@@ -355,7 +548,7 @@ mod tests {
         let s2 = tree.advance();
         assert_eq!(s2.len(), 1);
         assert_eq!(s2[0].0.max[0], 16); // lo region
-        // Tick 3: lo acc=1 (no), hi acc=3 (no)
+                                        // Tick 3: lo acc=1 (no), hi acc=3 (no)
         assert!(tree.advance().is_empty());
         // Tick 4: lo acc=2 (no), hi acc=4>=4 → step
         let s4 = tree.advance();
@@ -410,9 +603,7 @@ mod tests {
     fn test_remainder_carries_forward() {
         // cadence=3, verify it fires at ticks 3, 6, 9... not drifting.
         let mut tree = CadenceTree::new(field_region(), c(3));
-        let firing_ticks: Vec<usize> = (1..=12)
-            .filter(|_| !tree.advance().is_empty())
-            .collect();
+        let firing_ticks: Vec<usize> = (1..=12).filter(|_| !tree.advance().is_empty()).collect();
         assert_eq!(firing_ticks, vec![3, 6, 9, 12]);
     }
 }
