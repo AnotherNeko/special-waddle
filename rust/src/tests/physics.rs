@@ -69,6 +69,7 @@ fn measure_tau_global(initial: u32, cadence: Cadence) -> Option<u64> {
 #[test]
 fn test_time_constant_preserved_under_cadence_change() {
     // Max safe cadence for DIFFUSION_RATE=4: 7 * 2^4 - 1 = 111.
+    // in practice, cadence values above 18 are unstable - bugfix TODO.
     const CADENCE_VALUES: [u16; 14] = [1, 2, 3, 4, 6, 8, 10, 14, 18, 22, 25, 30, 45, 60];
     const N_SAMPLES: usize = 8;
     const BASE_TEMP: u32 = 200_000_000; // µK
