@@ -126,6 +126,30 @@ fn field_index(field: &IncrementalStep, x: i16, y: i16, z: i16) -> usize {
         + x as usize
 }
 
+/// Highest cadence period empirically proven stable for a given `diffusion_rate`,
+/// current fixed conductivity (65535). Sourced from
+/// `tests::physics::test_find_max_stable_cadence_per_diffusion_rate`, which sweeps
+/// cadence upward on a worst-case cell (an Infinity sink with three active neighbor
+/// pairs sharing one tile's `remainder_acc`) until a cell underflows to `u32::MAX` or
+/// mass is fabricated.
+///
+/// This is *not* derived from `compute_flow`'s per-pair stability bound
+/// (`divisor/conductivity`, e.g. 111 for diffusion_rate=4) — that bound assumes a single
+/// isolated pair. A cell that owns up to three overridden pairs in the same tile pass
+/// shares one accumulator across them, so the real safe cadence is roughly a fifth of
+/// the theoretical one. Rather than guess at that factor, the table below is the
+/// measured result; rerun the test above and update it if the kernel changes (e.g. the
+/// planned per-material conductivity for water/ice/steam).
+///
+/// Rates beyond the table (diffusion_rate > 8) fall back to the highest tested rate's
+/// bound rather than extrapolating.
+const MAX_STABLE_CADENCE_BY_DIFFUSION_RATE: [u16; 9] = [1, 2, 5, 11, 22, 46, 93, 196, 432];
+
+pub fn max_safe_cadence(diffusion_rate: u8) -> u16 {
+    let idx = (diffusion_rate as usize).min(MAX_STABLE_CADENCE_BY_DIFFUSION_RATE.len() - 1);
+    MAX_STABLE_CADENCE_BY_DIFFUSION_RATE[idx]
+}
+
 /// Compute diffusion flow: ΔΦ = (ΔV * C_mat) / (N_base * S_face * 2^shift * 2^16)
 /// Uses stochastic rounding via remainder accumulator for realistic small-scale diffusion.
 ///

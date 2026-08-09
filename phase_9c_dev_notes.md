@@ -449,3 +449,59 @@ distribution with the cadence gradient that drives it.
 - **`va_destroy_field` FFI**: `va_destroy_field` is already exported but
   `va_sc_cadence_bisect`'s Buffered contract cleanup on coarsen/merge needs care to
   not leave dangling entries in `delta_overrides`.
+
+## In-game bug pass (post 9c first playtest) — pending interface rework
+
+Found by playtesting the mostly-working 9c build. Fixes below are paused because the
+cadence/default-cadence interface is about to be redesigned (user has a bigger plan) —
+don't apply until that lands.
+
+- **Underflow/mass-creation bug (confirmed root cause)**: `apply_one_sided` (used by
+  Infinity/Void contracts, `kernel.rs`) can compute a `flow` larger than the target
+  cell's actual value when `conductivity * dt` isn't safely below `divisor` — `dt` here
+  is the *cadence* used as the zone's time step (see `step_zones_blocking`, and the
+  `process_contract_list` TODO that contracts currently use "the last firing zone's dt").
+  When that bound is violated the `u32` subtraction in `apply_one_sided`/`apply_pair`
+  wraps to near-`u32::MAX`, fabricating mass. This reproduces "messing with infinity
+  nodes and cadence causes underflow." Fix direction (agreed): enforce the bound at
+  cadence-*assignment* time (reject unsafe cadences in `va_sc_cadence_bisect`), not with
+  a per-step runtime clamp in the hot path.
+- **Max/default cadence not well-defined (confirmed, and worse than assumed)**: The
+  theoretical per-pair stability bound (`divisor/conductivity`, e.g. 111 for
+  diffusion_rate=4) is NOT the real safe limit — a cell can own up to 3 overridden pairs
+  sharing one tile's `remainder_acc`, so real stability breaks much earlier. Built a
+  generalized empirical sweep for this in
+  `rust/src/tests/physics.rs::test_find_max_stable_cadence_per_diffusion_rate`
+  (helpers: `build_ctrl_rate`, `cadence_is_stable`, `find_max_stable_cadence` — reusable
+  for any diffusion_rate, and later, per-material conductivity for water/ice/steam).
+  Measured max stable cadence by diffusion_rate (current fixed conductivity=65535):
+  `[1, 2, 5, 11, 22, 46, 93, 196, 432]` for rate 0–8 (rate 8 not exhaustively searched
+  above 432). This roughly matches the existing (currently failing)
+  `test_time_constant_preserved_under_cadence_change`, which found instability at
+  cadence 25 for diffusion_rate=4 against a naive-formula expectation of 111.
+  In-game field is created at diffusion_rate=2 (`mod/commands.lua` `/va_create_field`),
+  whose measured safe bound is only **5** — but `cadence.lua`'s
+  `compute_cadence_for_halfspace` currently produces values up to ~9 (and the palette
+  goes up to 32), so the SeamPlane can already assign unsafe cadences in normal play.
+  Proposed fix (not yet applied, pending the interface rework): a
+  `kernel::max_safe_cadence(diffusion_rate)` lookup sourced from the measured table,
+  enforced as a hard refusal in `va_sc_cadence_bisect` (reject, don't clamp), plus an FFI
+  getter so `cadence.lua`'s formula can size its output to the real bound instead of a
+  hardcoded 32.
+- **Merge queue bug (confirmed by reading code, not yet fixed)**: `M.pending_merge`
+  (`mod/cadence.lua`, `mod/animation.lua`) is a single slot, not a queue/set. If a second
+  SeamPlane's `action_off` fires while a merge is already pending, it silently
+  overwrites `M.pending_merge` — the first merge's Buffered contracts on its seam are
+  never polled to completion or cleaned up (leaked `delta_overrides` entries, seam stuck
+  mid-sync forever). Needs `M.pending_merges` keyed by seam identity (e.g. node pos),
+  animation loop polls all of them, and `action_on`/bisect should refuse to re-bisect a
+  plane that's already mid-merge rather than corrupt the KD-tree's assumed state —
+  surfaced as a clear refusal so the Lua caller knows to reconsider, not a silent no-op.
+- **"min cadence might be too slow" (not yet root-caused)**: likely about
+  `compute_cadence_for_halfspace`'s slow-zone output (up to 32) feeling too sluggish in
+  practice for a 16-wide field, rather than a logic bug — needs the user's call on
+  desired feel once the cadence-assignment interface is redesigned.
+- **Hotspot-tied-to-entity feature request**: deferred until after this bug pass per
+  user (see conversation) — needs a 3rd render-cube (edges only) tracking a tagged
+  Luanti entity; open question on the Luanti side is which entity/mod to move it with
+  (mentioned minecart/rollercoaster mod as a possible mount).

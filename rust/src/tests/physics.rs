@@ -10,8 +10,8 @@ const DIFFUSION_RATE: u8 = 4;
 const INFINITY_CELL: usize = 1 * 3 * 3 + 1 * 3 + 1; // = 13
 const MEASURE_CELL: usize = 2 * 3 * 3 + 2 * 3 + 5; // = 29: (x=2,y=0,z=3), away from sink
 
-fn build_ctrl(initial: u32, cadence: Cadence) -> StepController {
-    let mut ctrl = StepController::new_1(W, H, D, DIFFUSION_RATE, 1);
+fn build_ctrl_rate(diffusion_rate: u8, initial: u32, cadence: Cadence) -> StepController {
+    let mut ctrl = StepController::new_1(W, H, D, diffusion_rate, 1);
     ctrl.field.cells.iter_mut().for_each(|c| *c = initial);
     ctrl.contract_list.contracts.push(Contract {
         src_a: INFINITY_CELL as u32,
@@ -25,6 +25,85 @@ fn build_ctrl(initial: u32, cadence: Cadence) -> StepController {
     });
     ctrl.cadence_partition = CadenceTree::new(Gaaabb::new([0, 0, 0], [W, H, D]), cadence);
     ctrl
+}
+
+fn build_ctrl(initial: u32, cadence: Cadence) -> StepController {
+    build_ctrl_rate(DIFFUSION_RATE, initial, cadence)
+}
+
+/// Runs `ticks` global ticks and reports whether the field stayed stable throughout:
+/// no cell reached `u32::MAX` (the underflow signature) and total mass never exceeded
+/// its starting value (mass fabricated from nothing). This is the same failure mode
+/// `measure_tau_global` eventually notices via its 1e5-tick timeout, but checking for
+/// the signature directly makes a single trial cheap enough to use in a search — which
+/// matters because the actual instability threshold isn't the theoretical per-pair bound
+/// `divisor/conductivity` (see kernel::compute_flow's debug_assert): a cell can be the
+/// owner of up to three overridden pairs sharing one tile's remainder_acc, so the real
+/// bound is lower and must be found empirically for a given (diffusion_rate, conductivity)
+/// combination rather than computed in closed form.
+fn cadence_is_stable(diffusion_rate: u8, cadence: Cadence, initial: u32, ticks: u64) -> bool {
+    let mut ctrl = build_ctrl_rate(diffusion_rate, initial, cadence);
+    let initial_sum: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+
+    for _ in 0..ticks {
+        let firing = ctrl.cadence_partition.advance();
+        ctrl.step_zones_blocking(&firing);
+
+        if ctrl.field.cells.iter().any(|&v| v == u32::MAX) {
+            return false;
+        }
+        let sum: u64 = ctrl.field.cells.iter().map(|&v| v as u64).sum();
+        if sum > initial_sum {
+            return false;
+        }
+    }
+    true
+}
+
+/// Linear search for the highest cadence that stays stable for `ticks` global ticks at
+/// the given `diffusion_rate`. Assumes stability is monotonic in cadence (once a cadence
+/// is unstable, all higher cadences are too) — true of every case observed so far, and
+/// consistent with `compute_flow`'s bound growing with dt. Returns 0 if even cadence 1
+/// is unstable.
+///
+/// This is the generalized version of the sweep in
+/// `test_time_constant_preserved_under_cadence_change`, reusable for any diffusion_rate —
+/// and, once conductivity varies per material (ice vs. steam), for any conductivity too.
+fn find_max_stable_cadence(diffusion_rate: u8, search_limit: u16, ticks: u64) -> u16 {
+    const INITIAL: u32 = 200_000_000;
+    let mut max_stable = 0u16;
+    for c in 1..=search_limit {
+        if cadence_is_stable(diffusion_rate, Cadence::new(c), INITIAL, ticks) {
+            max_stable = c;
+        } else {
+            break;
+        }
+    }
+    max_stable
+}
+
+/// Empirically determines the max stable cadence for a handful of diffusion rates,
+/// including diffusion_rate=2 (what the in-game `/va_create_field` command currently
+/// uses — see mod/commands.lua). Prints a table for reference; asserts only that every
+/// rate has *some* stable cadence, since the exact bound is expected to shift as the
+/// physics kernel changes (e.g. the planned per-material conductivity for water/ice/steam).
+#[test]
+fn test_find_max_stable_cadence_per_diffusion_rate() {
+    const TRIAL_TICKS: u64 = 5000;
+    const SEARCH_LIMIT: u16 = 500;
+
+    for &rate in &[0u8, 1, 2, 3, 4, 5, 6, 7, 8] {
+        let max_stable = find_max_stable_cadence(rate, SEARCH_LIMIT, TRIAL_TICKS);
+        eprintln!(
+            "diffusion_rate={}: max stable cadence = {} (searched up to {})",
+            rate, max_stable, SEARCH_LIMIT
+        );
+        assert!(
+            max_stable >= 1,
+            "diffusion_rate={}: cadence 1 itself is unstable, something else is broken",
+            rate
+        );
+    }
 }
 
 /// Returns the number of global ticks for MEASURE_CELL to decay to initial/e (63.2% rule),
